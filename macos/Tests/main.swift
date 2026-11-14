@@ -1323,14 +1323,14 @@ struct TranslateRig {
     let client: FakeClient
     let t: FakeTranslator
     let clock: FakeClock
-    /// onTranslatePoll 叫了几次（外壳这时开始定时 poll）
+    /// onPoll 叫了几次（外壳这时开始定时 poll）
     let pollRequests: Counter
 
     /// 过了 seconds 秒，外壳的定时器 poll 一次。
     @discardableResult
     func tick(_ seconds: Double = 0.05) -> Bool {
         clock.now += seconds
-        return c.pollTranslation()
+        return c.poll()
     }
 
     var status: String { client.page?.translate?.status ?? "" }
@@ -1347,7 +1347,7 @@ func translateRig(_ change: (inout WowtypeConfig) -> Void = { _ in }) -> Transla
     let clock = FakeClock()
     let requests = Counter()
     c.clock = { clock.now }
-    c.onTranslatePoll = { requests.count += 1 }
+    c.onPoll = { requests.count += 1 }
     c.setTranslator(t)
     c.apply(config)
     c.switchMode(to: .translate)
@@ -1826,7 +1826,7 @@ func waitTranslation(_ c: Composer, _ server: FakeTranslateServer, until done: (
     let deadline = monotonicSeconds() + 15
     while monotonicSeconds() < deadline {
         server.service()
-        c.pollTranslation()
+        c.poll()
         if done() { return true }
         usleep(20_000)
     }

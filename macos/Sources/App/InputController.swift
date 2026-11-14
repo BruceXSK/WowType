@@ -28,8 +28,8 @@ class WowTypeInputController: IMKInputController {
     /// 照哪一版设置配的会话（AppState.configGeneration）
     private var configGeneration = -1
     /// 互译：在等译文时每 50 毫秒取一次结果（主线程的 run loop 上，菜单打开时也走）
-    private var translateTimer: Timer?
-    static let translatePollInterval: TimeInterval = 0.05
+    private var pollTimer: Timer?
+    static let pollInterval: TimeInterval = 0.05
     /// 切中 / 英 / 译以后在光标下面亮一下的提示，到时间收起（和 Linux 上 fcitx5 的提示一样）
     private var modeHintTimer: Timer?
     static let modeHintDuration: TimeInterval = 1
@@ -40,26 +40,26 @@ class WowTypeInputController: IMKInputController {
         composer.onCommit = { _ in AppState.shared.didCommit() }
         composer.onForget = { AppState.shared.didForget() }
         composer.sampleClipboard = { AppState.shared.sampleClipboard() }
-        composer.onTranslatePoll = { [weak self] in self?.startTranslatePolling() }
+        composer.onPoll = { [weak self] in self?.startPolling() }
         syncComposer()
     }
 
-    private func startTranslatePolling() {
-        guard translateTimer == nil else { return }
-        let timer = Timer(timeInterval: Self.translatePollInterval, repeats: true) { [weak self] timer in
-            guard let self, self.composer.pollTranslation() else {
+    private func startPolling() {
+        guard pollTimer == nil else { return }
+        let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] timer in
+            guard let self, self.composer.poll() else {
                 timer.invalidate()
-                self?.translateTimer = nil
+                self?.pollTimer = nil
                 return
             }
         }
         RunLoop.main.add(timer, forMode: .common)
-        translateTimer = timer
+        pollTimer = timer
     }
 
-    private func stopTranslatePolling() {
-        translateTimer?.invalidate()
-        translateTimer = nil
+    private func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
     }
 
     /// 词库载入完了、换了词库、改了设置：照 AppState 更新这个输入框的会话。
@@ -172,7 +172,7 @@ class WowTypeInputController: IMKInputController {
     override func deactivateServer(_ sender: Any!) {
         VoiceInput.shared.cancel(for: self)
         composer.commitComposition()
-        stopTranslatePolling()
+        stopPolling()
         showCandidates(nil)
         AppState.shared.save()
         super.deactivateServer(sender)

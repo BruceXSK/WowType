@@ -235,7 +235,7 @@ pub struct WowtypeSessionConfig {
     pub wubi_hint: c_int,
     /// 1.10 起：另设了进出「译」的快捷键，单按 Shift 只在中 ↔ 英之间切，默认 0。
     pub translate_key: c_int,
-    /// 1.10 起：联想（#89），默认 0。
+    /// 1.11 起：联想（#89），默认 0。
     pub prediction: c_int,
 }
 

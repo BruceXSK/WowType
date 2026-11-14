@@ -1122,7 +1122,7 @@ WowtypeEngine::~WowtypeEngine() {
         wowtype_voice_free(voice_);
         voice_ = nullptr;
     }
-    translateTimer_.reset();
+    tickTimer_.reset();
     if (translator_) {
         wowtype_translate_free(translator_);
         translator_ = nullptr;
@@ -1187,6 +1187,10 @@ void WowtypeEngine::finishCommit(fcitx::InputContext *ic, WowtypeState *state,
     // 会话已经清空编辑区、记过选词和上文、补好了空格；这里上屏、攒着存用户词库
     const std::string text = frame && frame->commit ? frame->commit : "";
     const bool learned = frame && frame->learned;
+    if (frame && frame->wake_after_ms > 0) {
+        // 选词上屏以后过一会儿联想（点候选上屏的也是）
+        scheduleTick(ic, frame->wake_after_ms);
+    }
     if (ic && !text.empty()) {
         // 会话已经补好了空格；互译时攒原文也是会话做的，这里上屏的是译文、原文或不在互译时的字
         ic->commitString(text);
@@ -2373,7 +2377,7 @@ std::string WowtypeEngine::translateKeyFile() const {
 void WowtypeEngine::clearTranslation(WowtypeState *state) {
     // 丢掉攒着的原文、取消这个输入框的请求（会话做）
     wowtype_session_translate_clear(state->session_);
-    if (translateIc_.get() && translateIc_.get()->propertyFor(&factory_) == state) {
+    if (tickIc_.get() && tickIc_.get()->propertyFor(&factory_) == state) {
         translateDrawn_.clear();
     }
 }
@@ -2386,15 +2390,15 @@ void WowtypeEngine::scheduleTick(fcitx::InputContext *ic, uint32_t ms) {
     if (!ic) {
         return;
     }
-    if (translateIc_.get() != ic) {
-        translateIc_ = ic->watch();
+    if (tickIc_.get() != ic) {
+        tickIc_ = ic->watch();
     }
     const uint64_t at = fcitx::now(CLOCK_MONOTONIC) + static_cast<uint64_t>(ms) * 1000;
-    if (!translateTimer_) {
-        translateTimer_ = instance_->eventLoop().addTimeEvent(
+    if (!tickTimer_) {
+        tickTimer_ = instance_->eventLoop().addTimeEvent(
             CLOCK_MONOTONIC, at, kTimerAccuracyUsec,
             [this](fcitx::EventSourceTime *source, uint64_t) {
-                const uint32_t next = tickTranslate();
+                const uint32_t next = onTick();
                 if (next > 0) {
                     source->setNextInterval(static_cast<uint64_t>(next) * 1000);
                     source->setOneShot();
@@ -2402,13 +2406,13 @@ void WowtypeEngine::scheduleTick(fcitx::InputContext *ic, uint32_t ms) {
                 return true;
             });
     } else {
-        translateTimer_->setTime(at);
-        translateTimer_->setOneShot();
+        tickTimer_->setTime(at);
+        tickTimer_->setOneShot();
     }
 }
 
-uint32_t WowtypeEngine::tickTranslate() {
-    auto *ic = translateIc_.get();
+uint32_t WowtypeEngine::onTick() {
+    auto *ic = tickIc_.get();
     if (!ic) {
         return 0;
     }
@@ -2425,13 +2429,19 @@ uint32_t WowtypeEngine::tickTranslate() {
         updateInputPanel(ic, state);
         return frame->wake_after_ms;
     }
+    const uint32_t wake = frame->wake_after_ms;
+    if (frame->panel == WOWTYPE_PANEL_PREDICTION) {
+        // 选词上屏以后的联想算好了
+        updateInputPanel(ic, state);
+        return wake;
+    }
     // 结果变了才重画；只换编辑区和提示行：正在打拼音时候选列表（和翻到的页、光标）不动
     if (translating(ic) && translateSignature(frame) != translateDrawn_) {
         fillTranslateView(ic, state, ic->inputPanel());
         ic->updatePreedit();
         ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
     }
-    return frame->wake_after_ms;
+    return wake;
 }
 
 std::string WowtypeEngine::translateSignature(const WowtypeFrame *frame) const {

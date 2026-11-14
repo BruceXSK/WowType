@@ -7,8 +7,10 @@
     python3 tools/install_wetype_nnlm.py /Applications/WeType.app
     python3 tools/install_wetype_nnlm.py path/to/nlrgpt2_nnlm.bin
 
-默认放到 ~/.local/share/wowtype/wetype/nlrgpt2_nnlm.bin（--dest 可改），会核对 MD5，
-对不上就不装（别的版本的文件格式可能不同）。装完重启 fcitx5 生效。
+默认放到 WowType 的数据目录：Linux 是 ~/.local/share/wowtype/wetype/nlrgpt2_nnlm.bin，
+macOS 是 ~/Library/Application Support/WowType/wetype/nlrgpt2_nnlm.bin（--dest 可改）。会核对 MD5，
+对不上就不装（别的版本的文件格式可能不同）。装完重启 fcitx5（macOS 上重新登录）生效。
+有了它整句候选更准，设置里的「联想」也能打开。
 """
 
 import argparse
@@ -23,6 +25,8 @@ KNOWN_MD5 = {"edca685aba600497de298dd68a5d5e4d"}
 
 
 def default_dest():
+    if sys.platform == "darwin":
+        return os.path.expanduser(os.path.join("~/Library/Application Support/WowType/wetype", NAME))
     base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
     return os.path.join(base, "wowtype", "wetype", NAME)
 

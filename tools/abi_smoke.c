@@ -85,17 +85,15 @@ int main(int argc, char **argv) {
     check(c && has_candidate(c, "天"), "context: tian -> 天");
     wowtype_candidates_free(c);
 
+    /* 联想要字级神经模型（不随 WowType 分发）：没载入时是空的，不是 NULL */
     c = wowtype_engine_predict_next(e, "今天", 3);
-    check(c && wowtype_candidates_len(c) > 0, "predict_next 有结果");
+    check(c && wowtype_candidates_len(c) == 0, "没有字级模型时 predict_next 是空的");
     wowtype_candidates_free(c);
 
-    /* 领域模型：设两次是换掉不是叠着混；混上以后联想照样按通用模型；设错的路径不动原来的 */
+    /* 领域模型：设两次是换掉不是叠着混；设错的路径不动原来的 */
     if (*bigram) {
         check(wowtype_engine_set_domain_lm(e, bigram) == 0, "set_domain_lm");
         check(wowtype_engine_set_domain_lm(e, bigram) == 0, "set_domain_lm 再设一次");
-        c = wowtype_engine_predict_next(e, "今天", 3);
-        check(c && wowtype_candidates_len(c) > 0, "混上领域模型后 predict_next 有结果");
-        wowtype_candidates_free(c);
     }
     check(wowtype_engine_set_domain_lm(e, "/nonexistent/words.domain.lm") == -1, "set_domain_lm 文件不在返回 -1");
     check(wowtype_engine_set_domain_lm(e, NULL) == 0, "set_domain_lm(NULL) 去掉");

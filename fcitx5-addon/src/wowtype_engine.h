@@ -468,7 +468,7 @@ private:
     /// 过 ms 毫秒叫一次会话的 tick（会话的 frame->wake_after_ms：等发请求、等译文）。
     void scheduleTick(fcitx::InputContext *ic, uint32_t ms);
     /// 定时器到了：tick 会话，按过回车且译好了的上屏，结果变了重画。返回多久以后再叫（0 不用）。
-    uint32_t tickTranslate();
+    uint32_t onTick();
     /// 现在画的互译内容（变了才重画）。
     std::string translateSignature(const WowtypeFrame *frame) const;
     /// 照微信输入法：译文直接写在应用的输入框里（编辑区），候选框当原文框
@@ -633,8 +633,8 @@ private:
     WowtypeTranslator *translator_ = nullptr;
     bool translateEnabled_ = false;
     /// 正在翻译的输入框（同一时间只译一个输入框的原文）。
-    fcitx::TrackableObjectReference<fcitx::InputContext> translateIc_;
-    std::unique_ptr<fcitx::EventSourceTime> translateTimer_;
+    fcitx::TrackableObjectReference<fcitx::InputContext> tickIc_;
+    std::unique_ptr<fcitx::EventSourceTime> tickTimer_;
     /// 到这个时刻（单调时钟，微秒）发请求；0 表示不用发。
     /// 上次画面板时的结果，没变就不重画。
     std::string translateDrawn_;

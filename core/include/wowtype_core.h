@@ -16,7 +16,7 @@
  * 删函数或改参数含义时升主版本。外壳启动时用 wowtype_abi_version() 比对主版本。
  * 规则见 docs/ABI.md。 */
 #define WOWTYPE_ABI_VERSION_MAJOR 1
-#define WOWTYPE_ABI_VERSION_MINOR 10
+#define WOWTYPE_ABI_VERSION_MINOR 11
 
 #ifdef __cplusplus
 extern "C" {
@@ -173,9 +173,9 @@ int wowtype_engine_load_history(WowtypeEngineHandle *engine, const char *path);
 WowtypeCandidates *wowtype_engine_input(WowtypeEngineHandle *engine, const char *input);
 
 /**
- * 联想：光标前是 prev_word（刚上屏的字）时接下来可能打的词，最多 limit 个。
- * 上一个词优先用引擎记下的最后一次选词（prev_word 正好以它结尾时），否则取 prev_word 末尾的两到四个字；
- * 词级语言模型的 ln P(词 | 上一个词) 加上学到的搭配，没把握时是空的（单字、太不可能的不给）。
+ * 联想：光标前是 prev_word（刚上屏的字）时接下来可能打的词（词库里两到四个字的词），最多 limit 个。
+ * 1.11 起用字级神经语言模型（wowtype_engine_load_nnlm）照光标前的这一句往下接，加上学到的搭配；
+ * 没载入模型、模型觉得这句说完了或者没把握时是空的。以前用词级语言模型，给的不像样，不再用。
  * 成功返回候选集合（text 为联想的词，score 越大越可能），必须 wowtype_candidates_free；
  * 失败返回 NULL，用 wowtype_last_error 取原因。会话的联想（WowtypeSessionConfig.prediction）用的是同一套。
  */
@@ -460,9 +460,12 @@ typedef struct {
     int wubi_hint;       /* 1.10 起：五笔逐码提示的候选后面显示还要打的码（WowtypeCandidateInfo.comment），默认 1 */
     int translate_key;   /* 1.10 起：另设了进出「译」的快捷键（WOWTYPE_KEY_ACTION_TOGGLE_TRANSLATE），
                           * 单按 Shift 只在中 ↔ 英之间切，默认 0 */
-    int prediction;      /* 1.10 起：联想，默认 0。选词上屏（空格、数字、点候选；五笔的自动上屏、顶字不算）以后，中文模式、光标前是汉字、
-                          * 不是密码框网址框邮箱框（WOWTYPE_KEY_HINT_NO_AUTO_SPACE）时，接着给出可能的下一个词：
-                          * frame->panel 是 WOWTYPE_PANEL_PREDICTION，编辑区是空的，没有光标（cand_cursor = -1）。
+    int prediction;      /* 1.11 起：联想，默认 0，要引擎载入了字级模型（wowtype_engine_load_nnlm）。
+                          * 选词上屏（空格、数字、点候选；五笔的自动上屏、顶字不算）以后，中文模式、光标前是汉字、
+                          * 不是密码框网址框邮箱框（WOWTYPE_KEY_HINT_NO_AUTO_SPACE）时，frame->wake_after_ms > 0：
+                          * 外壳过这么久调 wowtype_session_tick，那时算联想（模型一次十来毫秒，上屏不等它；
+                          * 这之前又按了键就不算）。有联想时 tick 的 frame->panel 是 WOWTYPE_PANEL_PREDICTION，
+                          * 编辑区是空的，没有光标（cand_cursor = -1）。
                           * 数字键选（上屏、学这个搭配、接着联想），Esc 收起；别的键都收起联想再照常处理，
                           * 会话不管的（空格、回车、退格、方向键……）handled = 0，照常交给应用：空格不会选中联想的词，
                           * 退格照常删应用里的字。联想时外壳要把每个键都交给会话（和工具栏开着时一样），
@@ -483,11 +486,11 @@ typedef struct {
     int panel;             /* WOWTYPE_PANEL_*：0 普通一页、1 展开面板（横排按下键，6 列，一屏 6 行）、
                             * 2 表情面板（1.10 起，同样的网格，preedit 是搜索词）、
                             * 3 工具栏（1.10 起，竖排一列，一页 9 个）；面板的提示在 aux；
-                            * 4 联想（1.10 起，见 WowtypeSessionConfig.prediction，没在打字，候选框照普通的画、不画光标） */
+                            * 4 联想（1.11 起，见 WowtypeSessionConfig.prediction，没在打字，候选框照普通的画、不画光标） */
     size_t cand_count;     /* 候选框里显示几个（一页，或展开面板的一屏）；用 wowtype_session_candidate 取 */
     int cand_cursor;       /* 光标在显示的这些里的位置；-1 不在这一页上（翻页按钮翻走以后） */
     int has_prev, has_next; /* 前面 / 后面还有一页（展开面板是一屏） */
-    uint32_t wake_after_ms; /* >0：这么久后再调会话（还没用，恒为 0） */
+    uint32_t wake_after_ms; /* >0：过这么久调一次 wowtype_session_tick（互译、联想） */
     int forgot;             /* 1.7 起：这次按键（Ctrl+Delete）让引擎忘掉了一个学过的词，
                              * 外壳该马上存用户词库和输入习惯（和上屏后存的一样） */
     int learned;            /* 1.10 起：这次上屏里有引擎学到的选词（选了引擎的候选、原样上屏输入），

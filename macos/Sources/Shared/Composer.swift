@@ -11,8 +11,8 @@
 //
 // 互译（「译」，和 Linux 的 fcitx5 外壳一样）：上屏的字不交给应用，攒成原文（translateSource）显示在
 // 候选框顶上；原文停下来 0.5 秒（句末标点立刻）发去翻译，译文边出边写在应用的编辑区里（带下划线）。
-// 回车 / 空格上屏译文，Shift+回车上屏原文，Esc 清空。翻译器不阻塞：外壳收到 onTranslatePoll 以后
-// 每 50 毫秒调一次 pollTranslation，直到它返回 false。
+// 回车 / 空格上屏译文，Shift+回车上屏原文，Esc 清空。翻译器不阻塞：外壳收到 onPoll 以后
+// 每 50 毫秒调一次 poll，直到它返回 false（选词上屏以后的联想也在 poll 里算，上屏不等它）。
 
 import CWowtype
 #if canImport(Glibc)
@@ -50,6 +50,12 @@ public final class Engine {
     @discardableResult
     public func setDomainLM(_ path: String?) -> Bool {
         wowtype_engine_set_domain_lm(handle, path) == 0
+    }
+
+    /// 微信输入法的字级神经语言模型（nlrgpt2_nnlm.bin，不随 WowType 分发）：整句重排、联想用。
+    @discardableResult
+    public func loadNnlm(_ path: String) -> Bool {
+        wowtype_engine_load_nnlm(handle, path) >= 0
     }
 
     @discardableResult
@@ -239,8 +245,9 @@ public final class Composer {
     }
     /// 现在画的是哪个结果（signature），结果变了才重画
     private var translateDrawn = ""
-    /// 原文变了、在等译文：外壳开始每 50 毫秒调一次 pollTranslation（已经在调就不用管）。
-    public var onTranslatePoll: (() -> Void)?
+    /// 会话要外壳过一会儿调 tick（原文变了在等译文、选词上屏以后要联想）：外壳开始每 50 毫秒
+    /// 调一次 poll（已经在调就不用管）。
+    public var onPoll: (() -> Void)?
     /// 单调时钟（秒），测试里换成假的。
     public var clock: () -> Double = monotonicSeconds
 
@@ -622,6 +629,8 @@ public final class Composer {
 
     /// 按会话给的 frame 上屏、更新编辑区和候选框。
     func apply(_ frame: UnsafePointer<WowtypeFrame>?) {
+        // 先读：重画时再取 frame 会把它盖掉
+        let wake = frame?.pointee.wake_after_ms ?? 0
         if let frame, let commit = frame.pointee.commit {
             // 会话已经补好了空格、记了上文；互译时上屏的是译文、原文
             let text = String(cString: commit)
@@ -635,6 +644,10 @@ public final class Composer {
             onForget?()
         }
         refresh()
+        if wake > 0 {
+            // 会话要外壳过一会儿调 tick（选词上屏以后的联想、互译）
+            onPoll?()
+        }
     }
 
     /// 上屏一段与拼音无关的字（语音识别的结果）：交给会话，和工具栏、表情面板上屏的一样
@@ -691,14 +704,19 @@ public final class Composer {
 
     // MARK: 互译
 
-    /// 外壳每 50 毫秒调一次（会话的 wake_after_ms）：到时间就发请求，按过回车的译好了就上屏，
-    /// 结果变了就重画。返回 false 表示不用再调了（下一次原文变了会再叫 onTranslatePoll）。
+    /// 外壳每 50 毫秒调一次（会话的 wake_after_ms）：联想算好了就画；互译到时间就发请求，
+    /// 按过回车的译好了就上屏，结果变了就重画。返回 false 表示不用再调了（下一次要的时候会再叫 onPoll）。
     @discardableResult
-    public func pollTranslation() -> Bool {
+    public func poll() -> Bool {
         guard let frame = wowtype_session_tick(session, UInt64(max(clock(), 0) * 1000)) else {
             return false
         }
-        if frame.pointee.commit != nil {
+        // 先读：重画时再取 frame 会把它盖掉
+        let wake = frame.pointee.wake_after_ms > 0
+        if frame.pointee.panel == WOWTYPE_PANEL_PREDICTION {
+            // 选词上屏以后的联想算好了
+            refresh()
+        } else if frame.pointee.commit != nil {
             // 按过回车，译好了：上屏译文（正在打的拼音留着）
             translateDrawn = ""
             apply(frame)
@@ -706,7 +724,7 @@ public final class Composer {
             // 结果变了才重画；正在打拼音时候选列表（和翻到的页、光标）不动
             refresh()
         }
-        return frame.pointee.wake_after_ms > 0
+        return wake
     }
 
     private func translateSignature(_ frame: UnsafePointer<WowtypeFrame>) -> String {
@@ -721,7 +739,7 @@ public final class Composer {
         let f = frame.pointee
         translateDrawn = translateSignature(frame)
         if f.wake_after_ms > 0 {
-            onTranslatePoll?()
+            onPoll?()
         }
         let shown = String(cString: f.translate_text)
         var box = String(cString: f.translate_source)

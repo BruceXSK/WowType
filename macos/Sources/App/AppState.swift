@@ -84,6 +84,8 @@ final class AppState {
     /// 本地翻译模型，设置里 TranslateLocalModel 留空时用（同 Linux 的 ~/.local/share/wowtype/models/）
     /// 语音识别模型（设置窗口「语音」页下载），同 Linux 的 ~/.local/share/wowtype/wtlocal
     var voiceModelDir: String { VoiceModelInstaller.folder(in: supportDir).path }
+    /// 微信输入法的字级神经语言模型（不随 WowType 分发，用户放进来的；和 Linux 的数据目录里一样的位置）
+    var nnlmPath: String { supportDir.appendingPathComponent("wetype/nlrgpt2_nnlm.bin").path }
 
     var localModelPath: String {
         supportDir.appendingPathComponent("models/HY-MT1.5-1.8B-Q4_K_M.gguf").path
@@ -223,6 +225,14 @@ final class AppState {
                 NSLog("WowType: 载入领域词级模型 %@", domain)
             } else {
                 NSLog("WowType: 领域词级模型载入失败 %@", domain)
+            }
+        }
+        // 微信输入法的字级神经语言模型（可选）：整句候选重排、联想
+        if FileManager.default.fileExists(atPath: nnlmPath) {
+            if engine.loadNnlm(nnlmPath) {
+                NSLog("WowType: 载入神经语言模型 %@", nnlmPath)
+            } else {
+                NSLog("WowType: 神经语言模型载入失败 %@", nnlmPath)
             }
         }
         engine.loadUserDict(userDictPath)

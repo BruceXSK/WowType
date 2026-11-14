@@ -192,6 +192,8 @@ impl Engine {
         let words = self.prediction_words.get_or_init(|| Words::build(&*self.base_lexicon));
         let sentence = sentence_tail(context);
         let mut found = search(&*model, words, sentence);
+        // 刚打过的不再给（你好 → 你好、哈哈哈 → 哈哈）
+        found.retain(|(word, _)| !context.ends_with(word.as_str()));
         let best = found.first().map_or(f64::NEG_INFINITY, |(_, s)| *s);
         found.retain(|(_, s)| best >= MIN_BEST_LOGP && *s >= best - RANGE);
         // 用户自己常接在上一个词后面的词：加分，不受上面的门槛
