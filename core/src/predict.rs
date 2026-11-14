@@ -28,6 +28,8 @@ const MIN_BEST_LOGP: f64 = -3.9;
 const RANGE: f64 = 2.0;
 /// 最多给几个（再多就是凑数，也更容易被数字键误选）。
 const MAX_SHOWN: usize = 5;
+/// 以这些语气词结尾的「词」（意思啊、你啦）是词库里的半截话，不给。
+const PARTICLES: [char; 4] = ['啊', '啦', '呀', '哦'];
 /// 往回最多看几个字找上一个词（查输入习惯里接在它后面的词）。
 const MAX_PREV_CHARS: usize = 4;
 
@@ -47,7 +49,8 @@ impl Words {
         lexicon.for_each_word(&mut |word, freq| {
             let n = word.chars().count();
             // 频次不到 1 的是大字表补的生僻读音
-            if freq >= 1.0 && (2..=MAX_CHARS).contains(&n) && word.chars().all(is_han) {
+            let whole = !word.ends_with(PARTICLES);
+            if freq >= 1.0 && (2..=MAX_CHARS).contains(&n) && word.chars().all(is_han) && whole {
                 all.push(word.to_owned());
             }
         });
