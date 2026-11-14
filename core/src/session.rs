@@ -1475,12 +1475,13 @@ impl<'e> Session<'e> {
     }
 
     /// 这时候上屏了能不能联想（[`Config::prediction`]）：中文模式、引擎有字级模型，
-    /// 互译、密码框网址框邮箱框（[`key_hints::NO_AUTO_SPACE`]）不联想。
+    /// 互译、密码框网址框邮箱框（[`key_hints::NO_AUTO_SPACE`]）不联想；开着繁体时也不联想
+    /// （模型是简体的，上文是繁体字时它几乎什么都接不上）。
     fn can_predict(&self) -> bool {
         self.config.prediction
             && self.mode == Mode::Chinese
             && self.hints & key_hints::NO_AUTO_SPACE == 0
-            && self.engine.is_some_and(Engine::has_nnlm)
+            && self.engine.is_some_and(|e| e.has_nnlm() && !e.config().traditional)
     }
 
     /// 算联想（[`Session::tick`] 里，选词上屏以后）。没把握时什么都不给（候选框照常收起）。

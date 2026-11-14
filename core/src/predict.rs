@@ -182,7 +182,7 @@ fn keep_best(items: &mut Vec<(String, f64)>, n: usize) {
 
 impl Engine {
     /// 光标前是 context（刚上屏的字结尾）时，接下来可能打的词和分数（越大越可能），
-    /// 最多 limit 个（不超过 5 个），按分数降序；没把握、没有字级模型时是空的。开着繁体时给的是繁体。
+    /// 最多 limit 个（不超过 5 个），按分数降序；没把握、没有字级模型时是空的。
     pub fn predict(&self, context: &str, limit: usize) -> Vec<(String, f64)> {
         let context = context.trim_end();
         if limit == 0 || !context.chars().next_back().is_some_and(is_han) {
@@ -214,25 +214,8 @@ impl Engine {
             }
         }
         found.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let mut out: Vec<(String, f64)> = Vec::new();
-        for (word, score) in found {
-            if out.len() >= limit.min(MAX_SHOWN) {
-                break;
-            }
-            let shown = self.shown_text(&word);
-            // 繁体转换后重了的不给
-            if out.iter().any(|(w, _)| *w == shown) {
-                continue;
-            }
-            if self.config.traditional {
-                // 和 input() 一样记下繁体对应的词库写法：选了以后学的、接着联想看的都是词库里的写法
-                if let Ok(mut last) = self.last_words.write() {
-                    last.insert(shown.clone(), vec![word]);
-                }
-            }
-            out.push((shown, score));
-        }
-        out
+        found.truncate(limit.min(MAX_SHOWN));
+        found
     }
 
     /// 输入习惯里的上一个词：会话选词上屏时引擎记下的最后一个词（光标前正好是它）；不是选词上屏的，

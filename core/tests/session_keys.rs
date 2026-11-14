@@ -2922,9 +2922,7 @@ fn fake_lm() -> FakeLm {
         ("今天天", vec![('气', 0.9)]),
         ("今天晚", vec![('上', 0.9)]),
         ("天气", vec![('不', 0.6), ('。', 0.2)]),
-        ("天氣", vec![('不', 0.6), ('。', 0.2)]),
         ("天气不", vec![('错', 0.9)]),
-        ("天氣不", vec![('错', 0.9)]),
         ("不错", vec![('。', 0.7), ('，', 0.2)]),
         ("谢谢", vec![('大', 0.4), ('老', 0.3)]),
         ("谢谢大", vec![('家', 0.9)]),
@@ -3265,21 +3263,19 @@ fn prediction_learns_user_pairs() {
 }
 
 #[test]
-fn prediction_traditional_chains() {
-    // 开着繁体：联想给繁体，选了以后学的、接着联想看的是词库写法（天气 → 不错）
+fn prediction_off_with_traditional() {
+    // 开着繁体不联想：模型是简体的，上文是繁体字时它几乎什么都接不上
     let mut engine = new_prediction_engine();
-    engine.install_converter(Converter::from_tsv_str("气\t氣\n错\t錯\n").unwrap());
+    engine.install_converter(Converter::from_tsv_str("气\t氣\n").unwrap());
     engine.set_traditional(true);
     let mut session = with(Box::leak(Box::new(engine)));
     session.configure(Config {
         prediction: true,
         ..Config::default()
     });
-    commit(&mut session, "jintian<sp>");
-    assert_eq!(shown(&mut session), ["天氣", "晚上"]);
-    assert_eq!(type_keys(&mut session, "1").commit.as_deref(), Some("天氣"));
-    ticked(&mut session);
-    assert_eq!(shown(&mut session), ["不錯"], "选了繁体的词接着联想");
+    let frame = type_keys(&mut session, "jintian<sp>");
+    assert_eq!(frame.wake_after_ms, 0);
+    assert_eq!(ticked(&mut session).cand_count, 0);
 }
 
 #[test]
