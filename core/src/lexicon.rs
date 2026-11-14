@@ -189,7 +189,7 @@ pub trait Lexicon: Send + Sync {
     fn total_freq(&self) -> f64;
 
     /// 挨个看每个词条的词和频次（同一个词有几个读音就看到几次）。默认什么都不给。
-    /// 联想用它给语言模型的词表配上词本身有多常用，见 [`crate::lm::LanguageModel::prepare_prediction`]。
+    /// 联想用它把词库里的词按字排一遍，见 [`crate::predict::Words`]。
     fn for_each_word(&self, _visit: &mut dyn FnMut(&str, f64)) {}
 
     fn len(&self) -> usize;

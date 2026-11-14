@@ -40,7 +40,7 @@ pub mod wubi;
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -198,7 +198,9 @@ pub struct Engine {
     /// 英文词表：小写编码 -> 上屏形式（github -> GitHub）。
     english: RwLock<Arc<HashMap<String, String>>>,
     /// 字级神经语言模型（微信输入法的 nlrgpt2，本机有才加载），给整句候选重排。
-    nnlm: RwLock<Option<Arc<nnlm::Nnlm>>>,
+    nnlm: RwLock<Option<Arc<dyn nnlm::CharLm>>>,
+    /// 联想沿着走的词（第一次联想时才建）。
+    prediction_words: OnceLock<predict::Words>,
     /// 五笔码表（选了五笔才载入，见 [`Engine::load_wubi`]）。
     wubi: RwLock<Option<Arc<wubi::WubiTable>>>,
 }
@@ -221,6 +223,7 @@ impl Engine {
             converter: RwLock::new(Arc::new(Converter::new())),
             english: RwLock::new(Arc::new(HashMap::new())),
             nnlm: RwLock::new(None),
+            prediction_words: OnceLock::new(),
             wubi: RwLock::new(None),
         }
     }
@@ -234,7 +237,7 @@ impl Engine {
         Ok(size)
     }
 
-    pub fn set_nnlm(&self, model: Option<Arc<nnlm::Nnlm>>) {
+    pub fn set_nnlm(&self, model: Option<Arc<dyn nnlm::CharLm>>) {
         if let Ok(mut slot) = self.nnlm.write() {
             *slot = model;
         }
@@ -1456,11 +1459,11 @@ impl Engine {
         };
         let mut order: Vec<usize> = (0..paths.len()).collect();
         order.sort_by(|&a, &b| paths[b].score.total_cmp(&paths[a].score));
-        let context = model.context_tokens(&self.context());
+        let context = self.context();
         let scored: Vec<(usize, f64)> = order
             .iter()
             .take(limit)
-            .map(|&i| (i, model.score(&context, &paths[i].text)))
+            .map(|&i| (i, model.score_text(&context, &paths[i].text)))
             .collect();
         let best = scored.iter().map(|s| s.1).fold(f64::NEG_INFINITY, f64::max);
         let worst = scored.iter().map(|s| s.1).fold(f64::INFINITY, f64::min);

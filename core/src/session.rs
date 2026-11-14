@@ -583,6 +583,8 @@ pub type Clock = fn() -> Option<LocalTime>;
 const CONTEXT_BYTES: usize = 24;
 /// 会话自己记的上文最多留几个字（排序用的上文、学搭配都只看最后几个字）。
 const CONTEXT_CHARS: usize = 20;
+/// 选词上屏以后过多久算联想（毫秒）：接着打字的人不用等，也不白算。
+const PREDICT_DELAY_MS: u32 = 40;
 /// emoji 推荐插在第几个（首选和次选后面）。
 const EMOJI_SLOT: usize = 2;
 /// 五笔的逐码提示最多列几个（只打一码时以它开头的有四五千条，列多了没用）。
@@ -644,7 +646,8 @@ pub struct Session<'e> {
     /// 联想给出的词（[`Panel::Prediction`]）；空的是没在联想。和候选框显示的一一对应：
     /// 收起候选框的地方都要清掉，不然数字键会选到看不见的词。
     predictions: Vec<Candidate>,
-    /// 这次调用选词上屏了，frame 里接着联想（之后又上屏了标点之类的就不联想了）。
+    /// 选词上屏了，等外壳调 [`Session::tick`] 时联想（frame 的 wake_after_ms 叫它）；
+    /// 收起联想的地方、按下下一个键都取消。
     predict_due: bool,
     /// 最近一次按键或 tick 的时刻（毫秒）。
     now_ms: u64,
@@ -774,6 +777,8 @@ impl<'e> Session<'e> {
         if key.release {
             return self.frame(false);
         }
+        // 又按了键：还没算出来的联想不要了（接着打字的不用等它，接着打的数字照常是数字）
+        self.predict_due = false;
         self.prev_char = key.prev_char;
         self.hints = key.hints;
         let surrounding = key.hints & key_hints::SURROUNDING != 0;
@@ -921,6 +926,9 @@ impl<'e> Session<'e> {
         self.last_choice = None;
         self.now_ms = now_ms;
         self.poll_translation();
+        if std::mem::take(&mut self.predict_due) {
+            self.predict();
+        }
         self.frame(true)
     }
 
@@ -1466,15 +1474,20 @@ impl<'e> Session<'e> {
         }
     }
 
-    /// 选词上屏以后接着联想（[`Config::prediction`]）：只在中文模式、光标前是汉字时；
-    /// 互译、密码框网址框邮箱框（[`key_hints::NO_AUTO_SPACE`]）不联想。没把握时什么都不给（候选框照常收起）。
+    /// 这时候上屏了能不能联想（[`Config::prediction`]）：中文模式、引擎有字级模型，
+    /// 互译、密码框网址框邮箱框（[`key_hints::NO_AUTO_SPACE`]）不联想。
+    fn can_predict(&self) -> bool {
+        self.config.prediction
+            && self.mode == Mode::Chinese
+            && self.hints & key_hints::NO_AUTO_SPACE == 0
+            && self.engine.is_some_and(Engine::has_nnlm)
+    }
+
+    /// 算联想（[`Session::tick`] 里，选词上屏以后）。没把握时什么都不给（候选框照常收起）。
     fn predict(&mut self) {
-        let Some(engine) = self.engine else {
+        let Some(engine) = self.engine.filter(|_| self.can_predict()) else {
             return;
         };
-        if !self.config.prediction || self.mode != Mode::Chinese || self.hints & key_hints::NO_AUTO_SPACE != 0 {
-            return;
-        }
         self.predictions = engine
             .predict(&self.context, self.page_size())
             .into_iter()
@@ -1489,8 +1502,9 @@ impl<'e> Session<'e> {
         }
     }
 
-    /// 收起联想。
+    /// 收起联想，还没算的也不算了。
     fn dismiss_prediction(&mut self) {
+        self.predict_due = false;
         if !self.predictions.is_empty() {
             self.predictions.clear();
             self.generation += 1;
@@ -1518,7 +1532,7 @@ impl<'e> Session<'e> {
             return false;
         };
         self.commit_with(&chosen.text, "");
-        self.predict_due = true;
+        self.predict_due = self.can_predict();
         self.last_choice = Some(chosen);
         true
     }
@@ -1740,7 +1754,6 @@ impl<'e> Session<'e> {
         };
         // 上屏了别的（标点、表情、语音……）：联想作废，这次也不再联想
         self.dismiss_prediction();
-        self.predict_due = false;
         if self.translating() {
             // 互译：上屏的字攒成原文，过一会儿（句末标点立刻）发请求
             self.translation.source.push_str(text);
@@ -2260,7 +2273,7 @@ impl<'e> Session<'e> {
         {
             self.choose_now(0);
             // 四码唯一自动上屏是打字途中的：不弹联想，接着打的数字也照常是数字
-            self.predict_due = false;
+            self.dismiss_prediction();
         }
     }
 
@@ -2280,7 +2293,7 @@ impl<'e> Session<'e> {
 
     fn push_input(&mut self, c: char) {
         // 同一个键上屏了又接着打（五笔顶字）：不联想，免得这个键刚弹出联想又得收起
-        self.predict_due = false;
+        self.dismiss_prediction();
         let at = self.caret();
         if at < self.input.len() {
             // 光标在拼音中间（#129）：插在光标处，光标跟着往后
@@ -2318,9 +2331,6 @@ impl<'e> Session<'e> {
 
     /// 现在的编辑区和候选框（不处理按键）。这次调用要上屏的字也在里面。
     pub fn frame(&mut self, handled: bool) -> Frame {
-        if std::mem::take(&mut self.predict_due) {
-            self.predict();
-        }
         let n = self.candidates().len();
         let selected = self.selected_text();
         let (shown, shown_caret) = self.segmented_remaining();
@@ -2352,6 +2362,10 @@ impl<'e> Session<'e> {
         if let Some((view, wake)) = self.translate_view() {
             frame.translate = Some(view);
             frame.wake_after_ms = wake;
+        }
+        if self.predict_due && frame.wake_after_ms == 0 {
+            // 联想在 tick 里算（模型一次十来毫秒）：上屏不等它
+            frame.wake_after_ms = PREDICT_DELAY_MS;
         }
         frame.aux = self.notice(n);
         if n == 0 {
@@ -2851,7 +2865,7 @@ impl<'e> Session<'e> {
             }
             _ => {
                 self.commit_with(&chosen.text, &chosen.pinyin);
-                self.predict_due = chosen.kind == CandidateKind::Word;
+                self.predict_due = chosen.kind == CandidateKind::Word && self.can_predict();
                 self.last_choice = Some(chosen);
             }
         }

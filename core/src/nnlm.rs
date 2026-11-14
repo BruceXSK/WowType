@@ -1,4 +1,4 @@
-//! 字级神经语言模型：读微信输入法 Linux 版自带的 `nlrgpt2_nnlm.bin`，给整句候选重排。
+//! 字级神经语言模型：读微信输入法 Linux 版自带的 `nlrgpt2_nnlm.bin`，给整句候选重排、联想。
 //!
 //! 模型文件是腾讯的，**不随 WowType 分发**：用户本机装过微信输入法（或自己下载官方安装包）
 //! 才有。这里只放读取和推理代码。文件格式和模型结构见 `docs/DATA.md` 的 NNLM 一节，简单说：
@@ -31,6 +31,15 @@ pub const BOS: u32 = 2;
 const MAX_CONTEXT: usize = 24;
 /// 前缀缓存最多存多少个状态（每个约 7 KB）。
 const CACHE_CAP: usize = 6000;
+
+/// 字级语言模型能做的两件事：整句重排（[`CharLm::score_text`]）、联想（[`CharLm::next_logprobs`]）。
+/// 引擎只认这个，测试里换成假的（真模型不随仓库分发）。
+pub trait CharLm: Send + Sync {
+    /// ln P(text | 光标前是 context)，逐字相加。
+    fn score_text(&self, context: &str, text: &str) -> f64;
+    /// 光标前是 context 时，下一个字是 chars 里各个字的 ln P；模型不认识的字是负无穷。
+    fn next_logprobs(&self, context: &str, chars: &[char]) -> Vec<f32>;
+}
 
 struct Layer {
     ln1_g: Vec<f32>,
@@ -343,6 +352,33 @@ impl Nnlm {
             lse: max + sum.ln(),
             used: clock,
         }
+    }
+}
+
+impl CharLm for Nnlm {
+    fn score_text(&self, context: &str, text: &str) -> f64 {
+        self.score(&self.context_tokens(context), text)
+    }
+
+    fn next_logprobs(&self, context: &str, chars: &[char]) -> Vec<f32> {
+        let prefix = self.context_tokens(context);
+        let Ok(mut cache) = self.cache.lock() else {
+            return vec![f32::NEG_INFINITY; chars.len()];
+        };
+        cache.clock += 1;
+        self.ensure(&mut cache, &prefix);
+        let state = cache.states.get(&prefix).expect("刚算过");
+        let out = chars
+            .iter()
+            .map(|c| match self.vocab.get(c) {
+                Some(&tok) => self.logit(tok, &state.y) - state.lse,
+                None => f32::NEG_INFINITY,
+            })
+            .collect();
+        if cache.states.len() > CACHE_CAP {
+            cache.evict();
+        }
+        out
     }
 }
 
