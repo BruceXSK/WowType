@@ -2041,14 +2041,16 @@ do {
 
 // MARK: 联想（#89）
 
-/// 联想要语言模型：小词库 + 一份 bigram（你好 → 世界 / 朋友，世界 → 和平），和别的用例分开一个引擎。
+/// 联想要微信输入法的字级模型（不随仓库分发）：WOWTYPE_NNLM 指着它时才测联想本身，
+/// 没有时只确认开着联想也什么都不给。词库是一小份，你好后面常接的词都在里面。
 func predictionEngine() -> Engine? {
     let dir = "/tmp/wowtype-macos-harness-\(getpid())-predict"
     mkdir(dir, 0o755)
-    writeFile(dir + "/lexicon.tsv", "ni hao\t你好\t50000\nshi jie\t世界\t30000\nhe ping\t和平\t20000\n")
-    writeFile(dir + "/bigram.tsv", "你好\t世界\t6\n你好\t朋友\t3\n世界\t和平\t5\n")
-    let engine = Engine(lexicon: dir + "/lexicon.tsv", languageModel: dir + "/bigram.tsv")
-    for file in ["lexicon.tsv", "lexicon.tsv.wcache", "bigram.tsv"] {
+    writeFile(dir + "/lexicon.tsv", "ni hao\t你好\t50000\nmei nv\t美女\t30000\nzai ma\t在吗\t30000\n"
+        + "peng you\t朋友\t30000\nhao de\t好的\t30000\nlao shi\t老师\t30000\nshi jie\t世界\t30000\n"
+        + "qing wen\t请问\t30000\nwo shi\t我是\t30000\n")
+    let engine = Engine(lexicon: dir + "/lexicon.tsv")
+    for file in ["lexicon.tsv", "lexicon.tsv.wcache"] {
         unlink(dir + "/" + file)
     }
     rmdir(dir)
@@ -2056,6 +2058,8 @@ func predictionEngine() -> Engine? {
 }
 
 if let predictEngine = predictionEngine() {
+    let model = getenv("WOWTYPE_NNLM").map { String(cString: $0) } ?? ""
+    let hasModel = !model.isEmpty && predictEngine.loadNnlm(model)
     func predicting(_ on: Bool = true) -> (Composer, FakeClient) {
         let client = FakeClient()
         let c = Composer(engine: predictEngine, client: client)
@@ -2064,63 +2068,71 @@ if let predictEngine = predictionEngine() {
         c.apply(config)
         return (c, client)
     }
-    do {
-        let (c, client) = predicting()
-        type(c, "nihao ")
-        check(client.committed == "你好", "联想：空格上屏你好", client.committed)
-        check(c.isPredicting && !c.isComposing, "联想：上屏后开着联想，没在打字")
-        check(client.marked.isEmpty, "联想：编辑区是空的", client.marked)
-        check(client.page?.texts == ["世界", "朋友"] && client.page?.cursor == -1,
-              "联想：候选框里是联想的词，没有光标", "\(client.page?.texts ?? []) \(client.page?.cursor ?? 99)")
-        check(c.handle(.char("1")) && client.committed == "你好世界", "联想：数字 1 选第一个", client.committed)
-        check(client.page?.texts == ["和平"], "联想：选了接着联想", "\(client.page?.texts ?? [])")
-        check(!c.handle(.char("7")) && client.committed == "你好世界" && client.page == nil,
-              "联想：联想个数以外的数字交给应用，收起联想")
+    /// 选词上屏，再像外壳的定时器一样调一次 poll（联想这时才算）
+    func commit(_ c: Composer, _ keys: String) {
+        type(c, keys)
+        c.poll()
     }
-    for (name, key) in [("空格", KeyInput.char(" ")), ("回车", .key(Keysym.returnKey)),
-                        ("退格", .key(Keysym.backspace)), ("左键", .key(Keysym.left)),
-                        ("Command+C", .char("c", .command))] {
-        let (c, client) = predicting()
-        type(c, "nihao ")
-        check(!c.handle(key) && client.committed == "你好" && client.page == nil && !c.isPredicting,
-              "联想：\(name)收起联想、交给应用，不上屏联想的词", client.committed)
+    if hasModel {
+        do {
+            let (c, client) = predicting()
+            commit(c, "nihao ")
+            let shown = client.page?.texts ?? []
+            check(client.committed == "你好", "联想：空格上屏你好", client.committed)
+            check(c.isPredicting && !c.isComposing && client.marked.isEmpty && !shown.isEmpty && client.page?.cursor == -1,
+                  "联想：poll 以后候选框里是联想的词，编辑区空、没有光标", "\(shown)")
+            check(c.handle(.char("1")) && client.committed == "你好" + (shown.first ?? ""), "联想：数字 1 选第一个", client.committed)
+            check(!c.handle(.char("9")) && client.page == nil, "联想：联想个数以外的数字交给应用，收起联想")
+        }
+        for (name, key) in [("空格", KeyInput.char(" ")), ("回车", .key(Keysym.returnKey)),
+                            ("退格", .key(Keysym.backspace)), ("左键", .key(Keysym.left)),
+                            ("Command+C", .char("c", .command))] {
+            let (c, client) = predicting()
+            commit(c, "nihao ")
+            check(!c.handle(key) && client.committed == "你好" && client.page == nil && !c.isPredicting,
+                  "联想：\(name)收起联想、交给应用，不上屏联想的词", client.committed)
+        }
+        do {
+            let (c, client) = predicting()
+            commit(c, "nihao ")
+            check(c.handle(.key(Keysym.escape)) && client.page == nil, "联想：Esc 收起")
+            commit(c, "nihao ")
+            _ = c.handle(.char("s"))
+            check(c.isComposing && client.marked == "s", "联想：打字母换成打字", client.marked)
+            _ = c.handle(.key(Keysym.escape))
+            // 切走输入框、语音输入开始、切英文：收起，数字不会选到看不见的词
+            commit(c, "nihao ")
+            c.commitComposition()
+            check(client.page == nil && !c.isPredicting, "联想：切走输入框收起")
+            commit(c, "nihao ")
+            c.dismissPrediction()
+            check(client.page == nil && !c.isPredicting, "联想：语音开始时收起")
+            commit(c, "nihao ")
+            c.switchMode(to: .english)
+            check(client.page == nil && !c.isPredicting, "联想：切英文收起")
+        }
+        do {
+            // 上屏以后、poll 之前又按了键：不算联想
+            let (c, client) = predicting()
+            type(c, "nihao 1")
+            c.poll()
+            check(client.page == nil && !c.isPredicting, "联想：poll 之前又按了键就不算")
+            // 密码框（安全输入）不联想
+            let (p, pClient) = predicting()
+            pClient.allowsTranslation = false
+            commit(p, "nihao ")
+            check(pClient.page == nil && !p.isPredicting, "联想：密码框里不联想")
+        }
+    } else {
+        print("skip 联想本身（没有 WOWTYPE_NNLM 指着微信输入法的 nlrgpt2_nnlm.bin）")
     }
     do {
-        let (c, client) = predicting()
-        type(c, "nihao ")
-        check(c.handle(.key(Keysym.escape)) && client.page == nil && client.committed == "你好", "联想：Esc 收起")
-        type(c, "nihao ")
-        _ = c.handle(.char("s"))
-        check(c.isComposing && client.marked == "s" && client.committed == "你好你好", "联想：打字母换成打字", client.marked)
-        _ = c.handle(.key(Keysym.escape))
-        type(c, "nihao ")
-        _ = c.handle(.char(","))
-        check(client.committed.hasSuffix("你好，") && client.page == nil, "联想：标点照常上屏", client.committed)
-    }
-    do {
-        // 切走输入框、语音输入开始：收起，数字不会选到看不见的词
-        let (c, client) = predicting()
-        type(c, "nihao ")
-        c.commitComposition()
-        check(client.page == nil && !c.isPredicting, "联想：切走输入框收起")
-        type(c, "nihao ")
-        c.dismissPrediction()
-        check(client.page == nil && !c.handle(.char("1")) && client.committed == "你好你好", "联想：语音开始时收起")
-        // 切英文收起
-        type(c, "nihao ")
-        c.switchMode(to: .english)
-        check(client.page == nil && !c.isPredicting, "联想：切英文收起")
-    }
-    do {
-        // 密码框（安全输入）不联想；设置里关着（默认）不联想
-        let (c, client) = predicting()
-        client.allowsTranslation = false
-        type(c, "nihao ")
-        check(client.committed == "你好" && client.page == nil && !c.isPredicting, "联想：密码框里不联想")
-        let (off, offClient) = predicting(false)
-        type(off, "nihao ")
-        check(offClient.committed == "你好" && offClient.page == nil && !off.isPredicting, "联想：默认关")
-        check(!off.handle(.char("1")), "联想：关着时数字照常交给应用")
+        // 没有模型（或者设置里关着）：开着联想也什么都不给，数字照常交给应用
+        let (c, client) = predicting(hasModel ? false : true)
+        commit(c, "nihao ")
+        check(client.committed == "你好" && client.page == nil && !c.isPredicting,
+              hasModel ? "联想：设置里关着不联想" : "联想：没有模型时不联想")
+        check(!c.handle(.char("1")), "联想：不联想时数字照常交给应用")
     }
 } else {
     check(false, "联想：载入测试引擎")

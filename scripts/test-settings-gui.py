@@ -152,6 +152,27 @@ def run(app):
         check(win.scheme_checks["Wubi86"].is_sensitive(), "有码表时五笔该能选")
     step("输入方案", input_scheme)
 
+    def prediction():
+        # 联想要微信输入法的字级模型（不随 WowType 分发）：没有时开关灰掉、副标题说为什么；
+        # 有时能开（拿一个空文件冒充，设置界面只看在不在）
+        found = type(win).build_input.__globals__
+        saved = found["NNLM_CANDIDATES"]
+        try:
+            found["NNLM_CANDIDATES"] = []
+            win.build_input()
+            row = win.switches["Prediction"]
+            check(not row.get_sensitive() and "nlrgpt2_nnlm.bin" in row.get_subtitle(), "没有模型时联想该灰掉")
+            fake = f"{home}/fake_nnlm.bin"
+            open(fake, "w").close()
+            found["NNLM_CANDIDATES"] = [fake]
+            win.build_input()
+            row = win.switches["Prediction"]
+            check(row.get_sensitive() and row.get_subtitle().startswith("上屏后"), "有模型时联想该能开")
+        finally:
+            found["NNLM_CANDIDATES"] = saved
+            win.build_input()
+    step("联想", prediction)
+
     def switches():
         win.theme_row.set_active(True)
         win.theme_row.set_active(False)

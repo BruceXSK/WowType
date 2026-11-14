@@ -492,11 +492,11 @@ private func contextTests() {
     }
 
     do {
-        // 联想：上屏以后候选框里是联想的词、编辑区空；空格交给应用并收起，不上屏联想的词
+        // 联想要微信输入法的模型（不随仓库分发，这里没有）：开着也不联想，上屏照常（联想本身在 macos/Tests 里测）
         let (c, f) = session(["Prediction": "True"])
         type(c, "xiexie")
         press(c, .space)
-        check(f.text == "谢谢" && f.markedText.isEmpty && !texts.isEmpty, "联想：谢谢后面给出联想的词", "\(texts)")
-        check(!press(c, .space) && f.text == "谢谢 " && panel == nil, "联想：空格交给应用、收起", "「\(f.text)」")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+        check(f.text == "谢谢" && panel == nil, "联想：没有模型时不联想", "\(texts)")
     }
 }

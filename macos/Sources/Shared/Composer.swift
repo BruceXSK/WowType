@@ -629,8 +629,6 @@ public final class Composer {
 
     /// 按会话给的 frame 上屏、更新编辑区和候选框。
     func apply(_ frame: UnsafePointer<WowtypeFrame>?) {
-        // 先读：重画时再取 frame 会把它盖掉
-        let wake = frame?.pointee.wake_after_ms ?? 0
         if let frame, let commit = frame.pointee.commit {
             // 会话已经补好了空格、记了上文；互译时上屏的是译文、原文
             let text = String(cString: commit)
@@ -644,10 +642,6 @@ public final class Composer {
             onForget?()
         }
         refresh()
-        if wake > 0 {
-            // 会话要外壳过一会儿调 tick（选词上屏以后的联想、互译）
-            onPoll?()
-        }
     }
 
     /// 上屏一段与拼音无关的字（语音识别的结果）：交给会话，和工具栏、表情面板上屏的一样
@@ -669,6 +663,10 @@ public final class Composer {
         }
         // 打字时，或者联想时（编辑区是空的，候选框里是联想的词）
         let frame = wowtype_session_frame(session)
+        if let frame, frame.pointee.wake_after_ms > 0 {
+            // 选词上屏了、要联想：外壳过一会儿调 poll（上屏不等它）
+            onPoll?()
+        }
         guard let frame, isComposing || frame.pointee.panel == WOWTYPE_PANEL_PREDICTION else {
             client?.setMarkedText("", cursor: 0)
             client?.showCandidates(nil)
