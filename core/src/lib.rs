@@ -1241,6 +1241,7 @@ impl Engine {
         };
 
         protect_exact_input(&mut result);
+        typos_after_typed(&mut result);
         promote_picked(&mut result);
         pin_single_initial(&normalized, &mut result);
         self.promote_custom(&mut result);
@@ -1912,6 +1913,7 @@ impl Engine {
                 let feature = Feature {
                     coverage_score: 1.0,
                     lm_score_with_previous_txt: lm as f32,
+                    fuzzy: true,
                     ..Feature::default()
                 };
                 let score = -view.cost(&entry)
@@ -2566,6 +2568,45 @@ fn protect_exact_input(candidates: &mut Vec<Candidate>) {
     *candidates = keep;
 }
 
+/// 纠错出来的候选不排在第一个照着打的读法（不纠错、每个词词库里都有、不是简拼）前面，
+/// 除非它用的音节更少（`jintiam` 的「今天」）。
+///
+/// [`typed_reading_first`] 在束搜索的结果上按分数压过一次，但后面按位置挪候选的步骤会把它绕过去：
+/// `sheihaiyo` 里压纠错词「谁还要」用的基准是补全出来的「谁还有」（yo → you），[`protect_exact_input`]
+/// 接着把补全的整句挪到「谁嗨哟」后面，「谁还要」就又成了第一个。这里按位置再拦一次，
+/// 不管前面谁动过顺序。只挪第一个照着打的读法前面的。
+fn typos_after_typed(candidates: &mut Vec<Candidate>) {
+    let syllables = |c: &Candidate| c.pinyin.split_whitespace().count();
+    let typed = |c: &Candidate| {
+        !is_raw_candidate(c)
+            && c.features.typo_count == 0.0
+            && c.features.full_jianpin == 0.0
+            && !c.words.is_empty()
+            && c.words.iter().all(|w| w.known)
+    };
+    let Some(anchor) = candidates.iter().position(typed) else {
+        return;
+    };
+    let need = syllables(&candidates[anchor]);
+    let yields = |c: &Candidate| c.features.typo_count > 0.0 && syllables(c) >= need;
+    if !candidates[..anchor].iter().any(yields) {
+        return;
+    }
+    let mut moved = Vec::new();
+    let mut keep = Vec::with_capacity(candidates.len());
+    for (i, c) in candidates.drain(..).enumerate() {
+        if i < anchor && yields(&c) {
+            moved.push(c);
+        } else {
+            keep.push(c);
+        }
+    }
+    let at = keep.iter().position(typed).map_or(keep.len(), |i| i + 1);
+    keep.splice(at..at, moved);
+    make_scores_monotonic(&mut keep);
+    *candidates = keep;
+}
+
 /// 两个候选的音节一样（整词和拼凑出来的整句：启动器 / 启动 | 其）。
 fn same_syllables(a: &Candidate, b: &Candidate) -> bool {
     a.pinyin.split_whitespace().eq(b.pinyin.split_whitespace())
@@ -2755,35 +2796,61 @@ fn prefix_on_syllable_boundaries(
         return Vec::new();
     };
     // 儿化的音节（wanr）按「音节 + r」两段算：第一名是「玩儿」时，wan 的单字（玩、万）照样是句首词
-    let syllables: Vec<&str> = top
-        .pinyin
-        .split_whitespace()
-        .flat_map(|s| match s.strip_suffix('r') {
-            Some(base) if !base.is_empty() && s != "er" => vec![base, "r"],
-            _ => vec![s],
-        })
-        .collect();
-    if syllables.len() < 2 {
-        prefix.clear();
-        return Vec::new();
-    }
+    let syllables_of = |c: &Candidate| -> Vec<String> {
+        c.pinyin
+            .split_whitespace()
+            .flat_map(|s| match s.strip_suffix('r') {
+                Some(base) if !base.is_empty() && s != "er" => {
+                    vec![base.to_string(), "r".to_string()]
+                }
+                _ => vec![s.to_string()],
+            })
+            .collect()
+    };
     let letters: String = normalized
         .chars()
         .filter(|c| c.is_ascii_alphabetic())
         .collect();
-    if top.features.full_jianpin > 0.0 || syllables.concat().len() > letters.len() + 2 {
+    let syllables = syllables_of(top);
+    if syllables.len() >= 2
+        && (top.features.full_jianpin > 0.0 || syllables.concat().len() > letters.len() + 2)
+    {
         // 简拼（zgrm）字母和音节对不上，不按边界筛
+        return Vec::new();
+    }
+    // 第一名是纠错出来的（yusezhi 的「越职」yue zhi、gaj 的「感」gan）时，用户照着打的读法
+    // （雨色质 yu se zhi、噶举 ga j…）的音节边界也算：纠错的音节对不上字母，只按它对齐的话
+    // 句首词和第一个音节的单字全被筛掉，候选只剩几个纠错出来的整词
+    let typed = (top.features.typo_count > 0.0)
+        .then(|| {
+            result.iter().find(|c| {
+                !is_raw_candidate(c)
+                    && c.features.typo_count == 0.0
+                    && c.features.full_jianpin == 0.0
+                    && c.words.iter().all(|w| w.known)
+            })
+        })
+        .flatten()
+        .map(syllables_of)
+        // 最后一个音节可以是补全出来的（saj 的「撒娇」sa jiao），比字母长；对齐只看它前面的音节
+        .filter(|s| s.len() >= 2);
+    if syllables.len() < 2 && typed.is_none() {
+        prefix.clear();
         return Vec::new();
     }
     // 从头对齐：补全和纠错只改动对不上的那一段，前面对得上的音节边界照样可信
     let mut boundaries = Vec::new();
-    let mut at = 0;
-    for syllable in &syllables[..syllables.len() - 1] {
-        if !letters[at..].starts_with(syllable) {
-            break;
+    for syllables in std::iter::once(&syllables).chain(typed.as_ref()) {
+        let mut at = 0;
+        for syllable in syllables.iter().take(syllables.len().saturating_sub(1)) {
+            if !letters[at..].starts_with(syllable.as_str()) {
+                break;
+            }
+            at += syllable.len();
+            if !boundaries.contains(&at) {
+                boundaries.push(at);
+            }
         }
-        at += syllable.len();
-        boundaries.push(at);
     }
     let exact = top.features.typo_count == 0.0;
     let mut other_splits = Vec::new();
@@ -3016,11 +3083,16 @@ fn compose_candidates(result: &mut Vec<Candidate>, prefix: Vec<Candidate>, max: 
     let mut kept: Vec<Candidate> = Vec::new();
     let mut sentences = 0usize;
     // 第一名是打全了的、词库里的整词（你好；纠错出来的也算：zhognguo -> 中国）时，比它差
-    // JUNK_SENTENCE_MARGIN 以上的整句（泥 | 好、点 | 脑、钟 | 国）是硬凑的，不占位置；用户选过的照留
+    // JUNK_SENTENCE_MARGIN 以上的整句（泥 | 好、点 | 脑、钟 | 国）是硬凑的，不占位置；用户选过的照留。
+    // 模糊音兜底加进来的词（模糊音关着时，ninke 接着上文出「宁可」）不算：照着打的读音（您 | 可）
+    // 只能排在它后面，不能被它当成硬凑的整个筛掉
     let top_word = whole
         .first()
         .filter(|c| {
-            c.words.len() == 1 && c.words[0].known && c.features.prefix_completion == 0.0
+            c.words.len() == 1
+                && c.words[0].known
+                && c.features.prefix_completion == 0.0
+                && !c.features.fuzzy
         })
         .map(|c| c.score);
     for c in whole {
@@ -5324,6 +5396,108 @@ mod tests {
                 assert!(texts.iter().any(|t| t == single), "{input} 没有「{single}」：{texts:?}");
             }
         }
+    }
+
+    fn ranked(text: &str, pinyin: &str, typos: f32, consumed: usize) -> Candidate {
+        Candidate {
+            text: text.into(),
+            pinyin: pinyin.into(),
+            score: 0.0,
+            features: Feature {
+                typo_count: typos,
+                typo: if typos > 0.0 { 1.0 } else { 0.0 },
+                coverage_score: 1.0,
+                ..Feature::default()
+            },
+            words: vec![CandidateWord {
+                text: text.into(),
+                pinyin: pinyin.into(),
+                freq: 1000.0,
+                known: true,
+            }],
+            consumed,
+        }
+    }
+
+    #[test]
+    fn typos_never_end_up_ahead_of_the_typed_reading() {
+        // sheihaiyo：前面的步骤把补全的整句挪走以后，纠错的「谁还要」又到了第一个
+        let mut list = vec![
+            ranked("谁还要", "shei hai yao", 1.0, 9),
+            ranked("谁嗨哟", "shei hai yo", 0.0, 9),
+            ranked("谁还有", "shei hai you", 0.0, 9),
+        ];
+        typos_after_typed(&mut list);
+        let texts: Vec<&str> = list.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["谁嗨哟", "谁还要", "谁还有"]);
+        assert!(
+            list.windows(2).all(|w| w[0].score > w[1].score),
+            "分数跟着顺序递减"
+        );
+
+        // 纠错以后音节更少（jintiam -> 今天）：不挪
+        let mut list = vec![
+            ranked("今天", "jin tian", 1.0, 7),
+            ranked("金蹄啊", "jin ti a", 0.0, 7),
+        ];
+        typos_after_typed(&mut list);
+        assert_eq!(list[0].text, "今天");
+    }
+
+    #[test]
+    fn prefix_words_follow_the_typed_syllables_when_the_top_is_a_correction() {
+        // yusezhi：第一名「越职」是删掉 s 纠出来的（yue zhi），按它对齐的话 yu、yu se 一个边界都对不上，
+        // 句首词（语塞、雨）全被筛掉，以前一共只剩 6 个候选
+        let result = vec![
+            ranked("越职", "yue zhi", 1.0, 7),
+            ranked("雨色质", "yu se zhi", 0.0, 7),
+        ];
+        let mut prefix = vec![
+            ranked("语塞", "yu se", 0.0, 4),
+            ranked("雨", "yu", 0.0, 2),
+            ranked("越", "yue", 1.0, 3),
+        ];
+        prefix_on_syllable_boundaries(&result, "yusezhi", &mut prefix);
+        let texts: Vec<&str> = prefix.iter().map(|c| c.text.as_str()).collect();
+        assert!(
+            texts.contains(&"语塞") && texts.contains(&"雨"),
+            "{texts:?}"
+        );
+
+        // gaj：第一名「感」是单音节的纠错词，以前一个句首词都不留（ga 的单字没了）
+        let result = vec![ranked("感", "gan", 1.0, 3), ranked("噶举", "ga ju", 0.0, 3)];
+        let mut prefix = vec![ranked("嘎", "ga", 0.0, 2)];
+        prefix_on_syllable_boundaries(&result, "gaj", &mut prefix);
+        assert_eq!(prefix.len(), 1);
+    }
+
+    #[test]
+    fn fuzzy_fallback_word_does_not_drop_the_typed_sentence() {
+        // ninke 接着上文打：模糊音兜底加的「宁可」（ning ke）排第一时，照着打的「您 | 可」不能被当成硬凑的整句筛掉
+        let mut fuzzy = ranked("宁可", "nin ke", 0.0, 5);
+        fuzzy.features.fuzzy = true;
+        fuzzy.score = -10.0;
+        let mut typed = ranked("您可", "nin ke", 0.0, 5);
+        typed.words = ["您", "可"]
+            .iter()
+            .zip(["nin", "ke"])
+            .map(|(t, p)| CandidateWord {
+                text: t.to_string(),
+                pinyin: p.into(),
+                freq: 1000.0,
+                known: true,
+            })
+            .collect();
+        typed.score = -20.0;
+        let mut result = vec![fuzzy.clone(), typed.clone()];
+        compose_candidates(&mut result, Vec::new(), 10);
+        assert!(result.iter().any(|c| c.text == "您可"), "照着打的整句被筛掉了");
+
+        // 照着打的整词排第一时，差得多的硬凑整句照旧筛掉（你好 vs 泥 | 好）
+        fuzzy.features.fuzzy = false;
+        let mut result = vec![fuzzy, typed];
+        compose_candidates(&mut result, Vec::new(), 10);
+        assert!(!result.iter().any(|c| c.text == "您可"));
     }
 
     #[test]
