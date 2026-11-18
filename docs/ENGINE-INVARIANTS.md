@@ -6,6 +6,10 @@
 
 引擎本身的设计见 [ENGINE.md](ENGINE.md)；排序评测（top1 命中率）见 [tools/eval/README.md](../tools/eval/README.md)。
 
+用户定的规矩，原话：「按键纠错逻辑我觉得应该是添加可疑的候选词，而不是替代原候选词吧」。这份文档把它当成头一条不变量：
+**纠错只能往候选里加东西，不能删掉、也不能盖过照着打的字母读出来的东西**（照着打的读法，和照着打的音节的字、词）。
+补全、简拼、模糊音、双拼、神经语言模型重排也拿同一条规矩查了一遍（第 6 节）。
+
 ## 1. 起因
 
 72bf8e2 修了 `cehaohou`（测好后）：接着「我本地」打时只出「的好后」「得好后」。三处原因叠在一起：
@@ -99,7 +103,9 @@
 | 纠错的代价 | 约 log 0.01 ~ log 0.001，而且是额外一层 | `typo_cost` = 8（≈ log 0.0003），但词频、语言模型、神经语言模型的分数范围能到十几二十，一个罚分盖不住 | 高频字（的、得、是）附近的键最容易出事 |
 | 句首词（前缀）对齐 | 从输入开头起的精确词无条件加入（P3） | 按**第一名**的音节边界筛（`prefix_on_syllable_boundaries`），第一名是纠错的时就按纠错的音节筛 | 第一名是纠错时，照着打的第一个音节的单字整个没了（`yusezhi`、`gaj`，本次修了） |
 | 单字 | 永远在，不受上限（P8） | 翻页长尾补，但长尾也是按第一名的切法补；候选上限 1000 一般够 | 同上 |
-| 补全 vs 精确 | librime 精确在前、再比剩下的码长（硬分层） | 补全每字母罚 1.5，单音节输入另有 `exact_syllable_first` 按位置分层，多音节输入只靠分数和 `protect_exact_input` | `typed_reading_first` 把补全出来的读法也当「照着打」的基准，后面的步骤又把补全的挪走了（`sheihaiyo`） |
+| 补全 vs 精确 | librime 精确在前、再比剩下的码长（硬分层） | 补全每字母罚 1.5，单音节输入另有 `exact_syllable_first` 按位置分层，多音节输入只靠分数和 `protect_exact_input`（只认第一个打全了的词） | `typed_reading_first` 把补全出来的读法也当「照着打」的基准，后面的步骤又把补全的挪走了（`sheihaiyo`）；`qingkuan` 的「请款」、`fangxiangji` 的「芳香剂」排在补全的「情况」「方向键」后面（本次修了） |
+| 同字同跨度 | 留没纠错的那条（P4） | 束搜索、句首词、长尾按代价去重：纠错读出来的同一个字更便宜就留纠错的 | `cunzai` 里没有「蹲」（cun）：纠错的 dun 便宜，照着打的被去重掉，纠错的又被筛掉（本次修了） |
+| 名额 | 输入开头的精确词不受名额限制（P3、P9） | 句首词、长尾每个跨度的名额纠错词和照着打的词一起抢；整句名额同样 | 纠错出来的常用词把照着打的冷门字、整句挤掉（`weihuj` 接着上文打一个照着打的整句都不剩，本次修了） |
 | 模糊音兜底 | 模糊音是和精确读音并列的一层，罚分固定（log 0.5），精确的永远在（P1） | 模糊音关着时 `fuzzy_fallback` 在第一名偏弱时补一两个模糊音的词，和其它候选按分数混排；`compose_candidates` 以前把它当成「打全了的整词」，比它差 3 以上的照着打的整句全当硬凑的筛掉 | 接着上文打 `ninke` 只剩「宁可」，照着打的「您可」整个没了（本次修了） |
 | 简拼 | 正常拼写走得通就删简拼边 | 全拼有精确路径且有认识的词时不建简拼图（`run_query`），结构上已经分层 | 和成熟引擎一致 |
 | 整句 vs 整词 | 有精确整词盖住整段输入就不拼整句（P6） | 照样拼，再由 `protect_exact_input`、`compose_candidates` 的 `JUNK_SENTENCE_MARGIN` 按分差筛 | 分差是调出来的阈值 |
@@ -125,6 +131,15 @@
 | `min-candidates` | 第一个音节是打全了的音节时，中文候选至少 min(9, 这个音节的常用单字数) 个 | P8 |
 | `typed-kept` | 没有上文、不带模型时照着打的读法，加了上文或带上模型以后还在：是一个词时这个词还在；是几个词拼的整句时，至少还有一个照着打的整句 | P1 |
 | `no-duplicates` | 没有字和用掉的键都一样的两条候选 | P4 |
+| `completion-outranks-word` | 打全了、整个输入正好是一个常用词（词频 1000 以上、拼音和打的字母一字不差）时，补全出来的候选不排在它前面 | P7 |
+| `typo-only-adds` | **用户的规矩**：把按错键纠错关掉再查一次，关掉时第一页的词（整词、句首词、单字）开着时都还在，关掉时排第一的照着打的读法开着时也还在（是几个词拼的整句时，至少还有一个照着打的读法） | P1、P3 |
+| `typo-outranks-typed` | 关掉纠错时排第一的照着打的读法，开着时不排在纠错加进来的候选后面（音节更少的例外，同 `typed-first`） | P1 |
+| `fuzzy-only-adds` | 同 `typo-only-adds`，关的是模糊音兜底 | P1 |
+| `fuzzy-outranks-typed` | 同 `typo-outranks-typed`，关的是模糊音兜底。**只报告、不算失败**，见第 6 节「等决定」 | P1 |
+| `jianpin-only-adds`、`jianpin-outranks-typed` | 同上，关的是简拼；只查打全了的输入（`zg`、`wm` 本来就没有照着打的全拼读法，简拼就是照着打的） | P1 |
+
+纠错、模糊音兜底、简拼三条是对比着查的：开着时前两页里有它加进来的候选，就把它关掉（`set_typo_correction`、
+`set_fuzzy_fallback`、`set_jianpin_fallback`）再查一次。
 
 怎么跑：
 
@@ -135,7 +150,7 @@ scripts/invariants.sh /usr/share/wowtype --inv-limit 0                      # �
 ```
 
 数据目录、模型所在目录不可写时脚本先复制到临时目录（载入时会在旁边写缓存）。逐键约 2.4 万个前缀，加上带上文的约 5 万次查询（带模型再翻一倍），
-不带模型约两分钟，带模型约六分钟。CI 的「排序评测（真实词库）」任务在排序评测后面跑它（复用编好的 `wowtype-eval`）。
+不带模型约两分半，带模型约十分钟。CI 的「排序评测（真实词库）」任务在排序评测后面跑它（复用编好的 `wowtype-eval`）。
 
 **一条都不许违反。** 确实是对的、只是规则太死的，写进 `tools/eval/invariants-allow.tsv`（规则、输入、上文、理由四列），
 不写理由不认；清单里的条目不再违反了，检查也会失败，提醒删掉。现在清单是空的。
@@ -144,7 +159,9 @@ scripts/invariants.sh /usr/share/wowtype --inv-limit 0                      # �
 
 - 一种输入有几种照着打的切法（`kenengs` = ke neng s / ken eng s，`hung` = hu ng / hun g…）：只要候选里第一个照着打的读法用的那一种的单字；
 - 词库里一个字都没有的音节（`nia`、`ng`、`hm`）不算「照着打能读」：`zuinia` 照着打是 zui ni a，三个音节，纠一处的「最佳」两个音节，按「音节更少」的例外排第一不算错；
-- 模糊音兜底的词（`zuijing` 的「最近」、`penyou` 的「朋友」）不算照着打的读法：规则查词库，词库里这个词真有这个读音才算。
+- 模糊音兜底的词（`zuijing` 的「最近」、`penyou` 的「朋友」）不算照着打的读法：规则查词库，词库里这个词真有这个读音才算；
+- 翻页长尾里补全出来的词没有补全的标记（`shenghu` 的「圣皇」是 sheng huang）：「打全了的词」要拼音和打的字母一字不差；
+- 「只能加」不管几个词硬凑的整句（`zenm` 的「谮吗」）：整句有名额、会换拼法，只要还有一个照着打的读法就行。
 
 ## 6. 这次查出来的
 
@@ -152,33 +169,94 @@ scripts/invariants.sh /usr/share/wowtype --inv-limit 0                      # �
 
 ### 修之前（pre-release 的 72bf8e2，规则同上）
 
-NNLM_BEFORE_PLACEHOLDER
+检查跑在两种配置上：不带模型（和 CI 一样），以及带 `nnlm.bin`（每种上文带、不带模型各查一次）。
 
-### 修了的两处
+| 规则 | 不带模型 | 带模型 |
+|---|---:|---:|
+| `typed-first` | 1 | 5 |
+| `typed-first-partial` | 0 | 0 |
+| `first-syllable-chars` | 22 | 44 |
+| `min-candidates` | 1 | 4 |
+| `typed-kept` | 5 | 13 |
+| `no-duplicates` | 0 | 0 |
+| 合计 | 29 | 66 |
 
-1. **第一名是纠错时，句首词和单字按纠错的音节对齐，全被筛掉**（`prefix_on_syllable_boundaries`）。
+典型的几条（`*` 是纠错出来的，`…` 是句首词）：
+
+- `suanlibugouxunli`（算力不够训练，带模型）：候选只有三个，第一个是纠错的「山里不够训练*」，suan 的单字一个都没有。
+  和 `cehaohou` 同一类，72bf8e2 没拦住：拦的是束搜索里的分数，后面按位置挪候选的步骤又把纠错的挪了回来，句首词也按纠错的音节对齐。
+- `jidegeimamadadianhu`（记得给妈妈打电话，接着「我本地」、带模型）：只剩三个，第一个「借给妈妈打电话*」，ji 的单字没了。
+- `ditieshan`（接着「我本地」、带模型）：第一个是「地铁站*」（sh 当成 zh），照着打的「地铁山」排在后面；`hegere` 第一个是「合格的*」。
+- `yusezhi`：一共 6 个候选，全是纠错和硬凑的整句，yu 的单字、「语塞」都没有。
+- `sheihaiyo`：第一个是纠错的「谁还要*」（yo 当成漏按的 yao），照着打的「谁嗨哟」第二。
+- `saj`、`ern`、`rem`、`huw`、`kab`、`shuk`……（接着「我本地」）：第一个是纠错出来的单字（赛*、人*……），
+  第一个音节（sa、er、re、hu……）的单字一个都没有。
+- `ninke`、`zhouru`、`pencha`……（接着「我本地」）：模糊音兜底的「宁可」「走入」排第一，照着打的「您可」「周如」整个没了。
+
+「只能加」的六条规则（`completion-outranks-word` 和 typo / fuzzy / jianpin 的两条）是在前三处修完以后才加的，
+旧引擎上没法直接跑（要用到本次加的 `Feature::fuzzy`、`set_jianpin_fallback`）。规则改准以后第一次跑（不带模型，带「我本地」）：
+`completion-outranks-word` 58、`typo-only-adds` 122、`typo-outranks-typed` 1、`fuzzy-only-adds` 5，修到下面第 9 处时全部清零。
+
+### 修了的九处
+
+1. **第一名是纠错或模糊音兜底的词时，句首词和单字按它的音节对齐，全被筛掉**（`prefix_on_syllable_boundaries`）。
    `yusezhi`：第一名「越职」是删掉 s 纠出来的（yue zhi），yu、yu se 一个边界都对不上，句首词（语塞、雨……）全没了，
-   整个候选框只有 6 个；`gaj`：第一名「感」（gan）只有一个音节，按老规矩一个句首词都不留，ga 的单字（嘎）没了。
-   现在第一名是纠错的时，照着打的读法（第一个不纠错、每个词都认识、不是简拼的候选）的音节边界也算（对应 P3、P8）。
-   `yusezhi` 现在 790 个候选，第一页有「语塞」「雨」「与」。
+   整个候选框只有 6 个；`gaj`、`saj`、`ern`：第一名「感」「赛」「人」只有一个音节，按老规矩一个句首词都不留；
+   `kaoyang`：第一名是模糊音兜底的「考研」（按 kao yang 显示），照着打的「烤烟…」被筛掉。
+   现在照着打的读法（第一个不纠错、不是模糊音兜底、每个词都认识、不是简拼的候选）的音节边界也算；第一名是纠错的时，
+   拼音和打的字母一字不差的句首词一个都不筛（`jitnian` 以前整个候选框只剩「今天」「金田」，现在 ji 的字都在）。对应 P3、P8。
 2. **纠错词被按位置挪回第一**（新加 `typos_after_typed`）。`sheihaiyo`：`typed_reading_first` 压纠错词「谁还要」时
    用的基准是补全出来的「谁还有」（yo → you），接着 `protect_exact_input` 把补全的整句挪到「谁嗨哟」后面，
    「谁还要」又成了第一个。现在 `protect_exact_input` 之后按位置再拦一次：纠错的候选不排在第一个照着打的读法前面，
    除非音节更少（对应 P1）。
+3. **模糊音兜底的词把照着打的整句当成硬凑的筛掉**（`compose_candidates`）。接着上文打 `ninke` 时补进来的「宁可」排第一，
+   比它差 3 以上的整句都当硬凑的去掉，照着打的「您可」整个没了（`zhouru`、`nachi`、`zhidingyi` 带模型时也一样）。
+   现在模糊音兜底的候选带标记 `Feature::fuzzy`（不是排序特征，不进权重），不当这个筛选的基准（对应 P1）。
+4. **纠错词当硬凑整句的基准**（`compose_candidates`）。`meiyuo`：第一名「没有」是 yuo 当成 you 纠出来的，拿它去筛，
+   照着打的「没雨哦」整个没了。现在纠错出来的词只在没有任何照着打的读法时才当基准（`zhognguo` 这种本来就读不通的照旧）。
+5. **整句名额被纠错的整句占满**（`compose_candidates`）。接着上文打 `weihuj`、`weidew`：前面全是纠错的「委会」「委的」，
+   照着打的「委户籍」「味的我」一个都不剩。现在前面一个照着打的都没有时，照着打的这一句不受整句名额限制（对应 P3）。
+6. **同字同跨度留了纠错的那条**（`beam.rs` 的 `collect_spans`）。「蹲」dun 常用、cun 冷门：同一个跨度里按代价去重，
+   纠错读出来的 dun 便宜，照着打的 cun 被去掉，后面纠错的又被筛掉，`cunzai`、`cunku` 里没有「蹲」。现在同字时留照着打的（对应 P4，
+   和 libime 一样）。
+7. **句首词、长尾的名额纠错词和照着打的一起抢**（`collect_spans`、`first_words`）。现在纠错词另算名额，超过上限时先去掉纠错词（对应 P3）。
+   束搜索本身不动（72bf8e2 的 `prune` 已经给纠错最少的状态保底）。
+8. **补全压过打全了的词**。两处：`protect_exact_input` 把模糊音兜底的「结束」（jiesu）当成打全了的锚点，一个都不挪，
+   补全的「结算」压在「借宿」前面（锚点现在不认模糊音）；它只认第一个打全了的词，`fangxiangji` 第一个是「放像机」时补全的
+   「方向键」照样压在「芳香剂」前面（新加 `completions_after_exact_words`，补全的排到所有打全了的常用词后面）；束搜索名额被补全占满时，
+   打全了的「请款」（qingkuan）从长尾补进来，以前插在全部补全候选后面（`append_more_candidates`，现在插在补全前面）。对应 P7。
+9. 排序评测因此**涨了**：`trunc_exact` 96.7% → 98.4%，`mid` 93.8% → 94.1%，其余各组持平，`tools/eval/baseline.tsv` 已更新。
 
-3. **模糊音兜底的词把照着打的整句当成硬凑的筛掉**（`compose_candidates`）。模糊音关着时，第一名偏弱就由
-   `fuzzy_fallback` 补一两个模糊音的词（`penyou` → 朋友）。接着上文打 `ninke` 时补进来的「宁可」（ning ke）排第一，
-   `compose_candidates` 把它当成「打全了的整词」，比它差 3 以上的整句都当硬凑的去掉，照着打的「您可」整个没了
-   （`zhouru` 的「周如」、`nachi` 的「那吃」、`zhidingyi` 的「指定一」带模型时也一样）。现在模糊音兜底的候选带一个标记
-   （`Feature::fuzzy`，不是排序特征，不进权重），不当这个筛选的基准（对应 P1）：照着打的整句排在它后面，不再被筛掉。
-
-三处都有单元测试（`typos_never_end_up_ahead_of_the_typed_reading`、
-`prefix_words_follow_the_typed_syllables_when_the_top_is_a_correction`、
-`fuzzy_fallback_word_does_not_drop_the_typed_sentence`）。排序评测各组和基线持平（逐组 +0.0）。
+每一处都有单元测试（`typos_never_end_up_ahead_of_the_typed_reading`、
+`prefix_words_follow_the_typed_syllables_when_the_top_is_a_correction`、`typed_prefixes_stay_when_the_top_is_a_correction`、
+`fuzzy_fallback_word_does_not_drop_the_typed_sentence`、`a_corrected_word_does_not_drop_typed_sentences_as_junk`、
+`typed_reading_of_a_char_survives_a_cheaper_correction`、`completions_go_after_every_exact_word`）。
 
 ### 修之后
 
 NNLM_AFTER_PLACEHOLDER
+
+### 等决定：模糊音兜底要不要也「只加不抢第一」
+
+模糊音关着时，第一名偏弱就由 `fuzzy_fallback` 补一两个模糊音的词，分数高出一截就排第一：`zhouba` 第一是「走吧」，
+照着打的「周报」第二；`lindai` 第一是「领带」，照着打的「林带」第二。按用户的规矩，这也是「替代」。但回归集
+（`tools/eval/regress.tsv` 第 82、83 条）明确要求 `shengme` → 什么、`penyou` → 朋友 排第一，改成只加这两条就失败。
+所以现在：模糊音兜底**只加不删**是硬规则（`fuzzy-only-adds`，已经清零），**排到照着打的前面**只报告（`fuzzy-outranks-typed`，
+不带模型约 57 条）。要改的话：`typos_after_typed` 的 `yields` 加上 `c.features.fuzzy`（试过，其余各组不变），同时改回归集那两条。
+
+### 其它几种机制
+
+- **双拼**：按错键纠错和模糊音兜底在双拼下本来就关着（`run_query`、`prefix_candidates`、`append_more_candidates` 里的
+  `typo = typo_correction && !shuangpin`、`fuzzy_fallback && !shuangpin`），补全只给悬空的声母，简拼只在全拼走不通时用，
+  结构上不会替换照着打的读法。不变量检查不跑双拼用例（`sp=`），这一点是读代码得出的，没有逐键验证。
+- **神经语言模型重排**：只在束搜索的路径里重排，72bf8e2 以后以照着打的读法为基准；带 `nnlm.bin` 的检查里
+  `typed-kept`（加了模型照着打的读法还在）和其余规则见上表。
+- **会话层**（`core/src/session.rs`）：读了候选怎么拼（`compute_candidates`）、翻页、选句首词（`choose_now`）、学习（`learn`、
+  `learn_composed`）、上文（`set_context`、`check_context`）。会话只往引擎的候选里**加**东西（emoji 推荐插在第 3 个、按键 emoji、
+  日期时间），不删不重排引擎的候选；唯一挪位置的是日期时间的触发词（打 `shijian` 时把「时间」挪到第一），挪的就是照着打的那个词。
+  选了纠错出来的词，记的是纠错后的拼音（`record_selection_with_pinyin(词, 纠错后的拼音)`），不会把「ce → 的」学进去；
+  `promote_picked` 只提前没纠错、没补全、不是简拼的选过的词，所以选过一次纠错词也不会让它下次排到照着打的前面。
+  这一层没查出要改的地方；逐键的会话级检查（翻页、选了句首词以后剩下的部分）没有做，`scripts/addon-test.sh` 的按键用例照常全过。
 
 ## 7. 还没做的：把规矩收拢成分层
 
@@ -194,6 +272,6 @@ NNLM_AFTER_PLACEHOLDER
    作为显式的规则写在这一步，而不是靠分数碰巧。
 3. **纠错候选有名额**（P5）：照着打的读法存在时，前两页最多几个纠错候选。
 4. **句首词不再按第一名的切法筛**，改成 libime 的做法（P3）：从输入开头起、落在照着打的任一种切法的音节边界上的精确词无条件加入，
-   纠错的句首词只在分数窗口里加。本次的修复是这一步的最小版本。
+   纠错的句首词只在分数窗口里加。本次的修复（第 1、7 处）是这一步的最小版本。
 5. **有精确整词盖住整段输入时不拼整句**（P6），代替 `JUNK_SENTENCE_MARGIN` 这个按分差筛的阈值。
 6. **评测集加逐键的整句用例**：现在 `daily.tsv` 只测整句打完那一刻。不变量检查已经逐键跑，但只检查规则，不检查 top1。

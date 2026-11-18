@@ -20,6 +20,11 @@
 //!   加了上文或者带上模型以后还在：它是词库里的一个词时这个词还在候选里；是几个词拼的整句时，
 //!   至少还有一个照着打的整句（拼法可以换：晚 | 事儿 → 碗 | 事儿）。
 //! - **no-duplicates**：候选里没有字和用掉的键都一样的两条。
+//! - **completion-outranks-word**：打全了、整个输入正好是一个常用词（词频 1000 以上、读音一点不差）时，补全出来的
+//!   候选不排在它前面。
+//! - **typo / fuzzy / jianpin-only-adds**、**-outranks-typed**：按错键纠错、模糊音兜底、简拼只能**加**候选，不能替换：
+//!   把它关掉再查一次，关掉时第一页的候选开着时都还在，关掉时排第一的不排在它加进来的候选后面
+//!   （纠错以后音节更少的例外，同 typed-first）。见 [`only_adds`]。
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -32,8 +37,14 @@ use wowtype_core::{
     SyllableQuery,
 };
 
+/// 只报告、不算失败的规则：模糊音兜底的词排到照着打的读法前面（`penyou` -> 朋友、`shengme` -> 什么）
+/// 是回归集定死的现有行为，要不要也改成「只加」等用户定，见 docs/ENGINE-INVARIANTS.md。
+const REPORT_ONLY: [&str; 1] = ["fuzzy-outranks-typed"];
+
 /// 一页候选的个数（min-candidates 的上限）。
 const PAGE: usize = 9;
+/// completion-outranks-word 只管这么常用以上的词（和引擎的 `EXACT_PROTECT_MIN_FREQ` 一样）。
+const EXACT_WORD_FREQ: f64 = 1000.0;
 
 pub struct Options {
     /// 每个前缀都额外带上这些上文各查一次。
@@ -177,6 +188,25 @@ fn typed_reading<'a>(
         .find(|c| !is_raw(c) && !typo(c) && c.consumed >= len && lexicon_reading(lexicon, c))
 }
 
+/// 候选的拼音正好是打的字母（不是补全、纠错出来的）。翻页长尾里补全出来的词没有补全的标记，
+/// 只能这样认：shenghu 的「圣皇」是 sheng huang。
+fn same_letters(c: &Candidate, input: &str) -> bool {
+    let typed = input.bytes().filter(u8::is_ascii_alphabetic).map(|b| b.to_ascii_lowercase());
+    c.pinyin
+        .bytes()
+        .filter(u8::is_ascii_alphabetic)
+        .eq(typed)
+}
+
+/// 「照着打的」：不是纠错、模糊音兜底、简拼加进来的，每个词词库里真有这个读音。
+fn plain_typed(lexicon: &dyn Lexicon, c: &Candidate) -> bool {
+    !is_raw(c)
+        && !typo(c)
+        && !c.features.fuzzy
+        && c.features.full_jianpin == 0.0
+        && lexicon_reading(lexicon, c)
+}
+
 /// 照着打的读法是不是词库里的一个词（不是几个词拼出来的整句）。
 fn is_word(c: &Candidate) -> bool {
     c.words.len() == 1 && c.words[0].known
@@ -313,6 +343,38 @@ fn check_one(
             );
         }
     }
+    // completion-outranks-word：输入打全了、整个输入正好是一个够常用的词（读音一点不差）时，
+    // 补全出来的候选不排在它前面（zhongdi 出「种地」不出「重点」，见 protect_exact_input）
+    if shape.exact.is_some() {
+        let word_at = cands.iter().position(|c| {
+            c.consumed >= len
+                && is_word(c)
+                && c.words[0].freq >= EXACT_WORD_FREQ
+                && !typo(c)
+                && c.features.prefix_completion == 0.0
+                && c.features.full_jianpin == 0.0
+                && !c.features.fuzzy
+                && same_letters(c, input)
+                && lexicon_reading(lexicon, c)
+        });
+        if let Some(at) = word_at {
+            let ahead: Vec<&str> = cands[..at]
+                .iter()
+                .filter(|c| c.features.prefix_completion > 0.0)
+                .map(|c| c.text.as_str())
+                .collect();
+            if !ahead.is_empty() {
+                report(
+                    "completion-outranks-word",
+                    format!(
+                        "打全了的词「{}」排在补全出来的「{}」后面",
+                        cands[at].text,
+                        ahead.join("」「")
+                    ),
+                );
+            }
+        }
+    }
     // min-candidates
     let need = shape
         .head
@@ -341,6 +403,137 @@ fn check_one(
             );
             break;
         }
+    }
+}
+
+/// 只该往候选里「加」东西的机制：开着和关掉时的候选对比（[`only_adds`]）。
+struct Mechanism {
+    /// 规则名的前缀（`typo-only-adds`、`typo-outranks-typed`）。
+    name: &'static str,
+    /// 说明里的叫法。
+    label: &'static str,
+    /// 这个候选是这个机制加进来的。
+    added: fn(&Candidate) -> bool,
+    /// 开关。
+    set: fn(&mut Engine, bool),
+}
+
+impl Mechanism {
+    fn added(&self, c: &Candidate) -> bool {
+        (self.added)(c)
+    }
+
+    fn set(&self, engine: &mut Engine, on: bool) {
+        (self.set)(engine, on)
+    }
+}
+
+const MECHANISMS: [Mechanism; 3] = [
+    Mechanism {
+        name: "typo",
+        label: "按错键纠错",
+        added: |c| c.features.typo_count > 0.0,
+        set: |e, on| e.set_typo_correction(on),
+    },
+    Mechanism {
+        name: "fuzzy",
+        label: "模糊音兜底",
+        added: |c| c.features.fuzzy,
+        set: |e, on| e.set_fuzzy_fallback(on),
+    },
+    Mechanism {
+        name: "jianpin",
+        label: "简拼",
+        added: |c| c.features.full_jianpin > 0.0,
+        set: |e, on| e.set_jianpin_fallback(on),
+    },
+];
+
+/// 用户的原话：按键纠错应该是「添加可疑的候选词，而不是替代原候选词」。纠错、模糊音兜底、简拼都一样：
+///
+/// - `<机制>-only-adds`：关掉它时第一页有的词（词库里的整词、句首词、单字）和排第一的照着打的读法，开着时还在候选里；
+/// - `<机制>-outranks-typed`：关掉它时排第一的，开着时不排在它加进来的候选后面。例外和 typed-first 一样：
+///   纠错以后整个输入的音节更少（`jintiam` -> 今天）。
+fn only_adds(
+    mechanism: &Mechanism,
+    lexicon: &dyn Lexicon,
+    input: &str,
+    on: &[Candidate],
+    off: &[Candidate],
+    mut report: impl FnMut(&'static str, String),
+) {
+    let len = input.len();
+    let rule = |suffix: &str| -> &'static str {
+        match (mechanism.name, suffix) {
+            ("typo", "adds") => "typo-only-adds",
+            ("typo", _) => "typo-outranks-typed",
+            ("fuzzy", "adds") => "fuzzy-only-adds",
+            ("fuzzy", _) => "fuzzy-outranks-typed",
+            (_, "adds") => "jianpin-only-adds",
+            _ => "jianpin-outranks-typed",
+        }
+    };
+    // 词库里的词（整词、句首词、单字）一个都不能少；几个词拼的整句有上限、会换拼法，只要还有一个照着打的整句
+    let mut missing: Vec<&str> = off
+        .iter()
+        .filter(|c| !is_raw(c))
+        .take(PAGE)
+        .filter(|c| is_word(c) && plain_typed(lexicon, c))
+        .filter(|c| !on.iter().any(|o| o.text == c.text))
+        .map(|c| c.text.as_str())
+        .collect();
+    // 关掉时排第一的照着打的读法（关掉一种机制时另外几种照样会加候选，那些不算）：整句也要还在
+    let top = off
+        .iter()
+        .find(|c| c.consumed >= len && plain_typed(lexicon, c));
+    // 是几个词拼的整句时（我 | 知己）拼法可以换，至少还要有一个照着打的读法
+    let typed_on = on.iter().any(|c| c.consumed >= len && plain_typed(lexicon, c));
+    if let Some(t) = top.filter(|t| !is_word(t) && !typed_on) {
+        missing.push(t.text.as_str());
+    }
+    if !missing.is_empty() {
+        report(
+            rule("adds"),
+            format!(
+                "关掉{}时第一页有的「{}」，开着时没了；关掉时 {}",
+                mechanism.label,
+                missing.join("」「"),
+                brief(off, len, 9)
+            ),
+        );
+    }
+    let Some(top) = top else {
+        return;
+    };
+    // 开着时它前面的、加进来的候选：比到它和开着时第一个照着打的读法里靠前的那个
+    let Some(at) = on
+        .iter()
+        .position(|c| c.text == top.text || (c.consumed >= len && plain_typed(lexicon, c)))
+    else {
+        return;
+    };
+    let ahead: Vec<&Candidate> = on[..at]
+        .iter()
+        .filter(|c| mechanism.added(c))
+        .filter(|c| {
+            // 纠错以后整个输入用更少的音节读完（jintiam -> 今天）：和 typed-first 的例外一样
+            !(mechanism.name == "typo" && c.consumed >= len && syllables(c) < syllables(top))
+        })
+        .collect();
+    if !ahead.is_empty() {
+        report(
+            rule("outranks"),
+            format!(
+                "关掉{}时排第一的「{}」，开着时排到了它加进来的「{}」后面",
+                mechanism.label,
+                top.text,
+                ahead
+                    .iter()
+                    .map(|c| c.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("」「")
+            ),
+        );
     }
 }
 
@@ -373,7 +566,7 @@ fn read_allow(path: &str) -> HashMap<(String, String, String), String> {
 
 /// 跑全部检查，返回是不是有没列进清单的违反。
 pub fn run(
-    engine: &Engine,
+    engine: &mut Engine,
     lexicon: &dyn Lexicon,
     nnlm: Option<Arc<Nnlm>>,
     cases: &[(String, String)],
@@ -428,7 +621,7 @@ pub fn run(
     let mut queries = 0usize;
 
     let mut run_condition =
-        |engine: &Engine,
+        |engine: &mut Engine,
          input: &str,
          context: &str,
          with_nnlm: bool,
@@ -448,6 +641,24 @@ pub fn run(
             check_one(input, shape, &cands, lexicon, &mut chars, |rule, detail| {
                 found.push((rule, detail))
             });
+            // 纠错、模糊音兜底、简拼只能「加」候选：关掉它再查一次，对比
+            for mechanism in &MECHANISMS {
+                if !cands.iter().take(2 * PAGE).any(|c| mechanism.added(c)) {
+                    continue;
+                }
+                // 简拼只在全拼走不通时才用（zg、wm 本来就没有照着打的全拼读法），只查打全了的输入：
+                // 那时它一个候选都不该加
+                if mechanism.name == "jianpin" && shape.exact.is_none() {
+                    continue;
+                }
+                mechanism.set(engine, false);
+                let off = engine.input(input);
+                mechanism.set(engine, true);
+                queries += 1;
+                only_adds(mechanism, lexicon, input, &cands, &off, |rule, detail| {
+                    found.push((rule, detail))
+                });
+            }
             let base = context.is_empty() && !with_nnlm;
             // typed-kept：照着打的读法是个词时这个词还在；是几个词拼的整句时（晚 | 事儿），换一种拼法
             // （碗 | 事儿）也算，但至少要有一个照着打的整句
@@ -496,12 +707,12 @@ pub fn run(
     };
     for &m in modes {
         for p in &prefixes {
-            run_condition(engine, p, "", m, &mut violations, &mut typed);
+            run_condition(&mut *engine, p, "", m, &mut violations, &mut typed);
         }
     }
     for &m in modes {
         for (p, c) in &with_context {
-            run_condition(engine, p, c, m, &mut violations, &mut typed);
+            run_condition(&mut *engine, p, c, m, &mut violations, &mut typed);
         }
     }
     engine.set_context("");
@@ -534,7 +745,9 @@ pub fn run(
             used_allow.insert(v.key());
             continue;
         }
-        new_count += 1;
+        if !REPORT_ONLY.contains(&v.rule) {
+            new_count += 1;
+        }
         match by_rule.iter_mut().find(|(r, _)| *r == v.rule) {
             Some((_, list)) => list.push(v),
             None => by_rule.push((v.rule, vec![v])),
@@ -548,6 +761,13 @@ pub fn run(
         "min-candidates",
         "typed-kept",
         "no-duplicates",
+        "completion-outranks-word",
+        "typo-only-adds",
+        "typo-outranks-typed",
+        "fuzzy-only-adds",
+        "fuzzy-outranks-typed",
+        "jianpin-only-adds",
+        "jianpin-outranks-typed",
     ];
     println!("== 不变量");
     for rule in rules {
@@ -561,12 +781,17 @@ pub fn run(
             .filter(|v| v.rule == rule && allow.contains_key(&v.key()))
             .count();
         println!(
-            "{rule:<22} 违反 {}{}",
+            "{rule:<24} 违反 {}{}{}",
             list.len(),
             if allowed > 0 {
                 format!("（另有 {allowed} 条在已知清单里）")
             } else {
                 String::new()
+            },
+            if REPORT_ONLY.contains(&rule) {
+                "（只报告，不算失败，见 docs/ENGINE-INVARIANTS.md）"
+            } else {
+                ""
             }
         );
         let shown = if opts.limit == 0 {

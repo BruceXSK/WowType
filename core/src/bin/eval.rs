@@ -527,7 +527,13 @@ fn main() {
             allow: inv_allow,
             out: inv_out,
         };
-        let failed = invariants::run(&engine, lex_for_checks.as_ref(), nnlm_model, &cases, &opts);
+        let failed = invariants::run(
+            &mut engine,
+            lex_for_checks.as_ref(),
+            nnlm_model,
+            &cases,
+            &opts,
+        );
         if failed {
             eprintln!("有不变量被违反了");
             std::process::exit(1);
