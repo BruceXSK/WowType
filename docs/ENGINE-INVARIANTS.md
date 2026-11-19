@@ -195,9 +195,9 @@ scripts/invariants.sh /usr/share/wowtype --inv-limit 0                      # �
 
 「只能加」的六条规则（`completion-outranks-word` 和 typo / fuzzy / jianpin 的两条）是在前三处修完以后才加的，
 旧引擎上没法直接跑（要用到本次加的 `Feature::fuzzy`、`set_jianpin_fallback`）。规则改准以后第一次跑（不带模型，带「我本地」）：
-`completion-outranks-word` 58、`typo-only-adds` 122、`typo-outranks-typed` 1、`fuzzy-only-adds` 5，修到下面第 9 处时全部清零。
+`completion-outranks-word` 58、`typo-only-adds` 122、`typo-outranks-typed` 1、`fuzzy-only-adds` 5，修完下面几处以后不带模型时全部清零。
 
-### 修了的九处
+### 修了的几处
 
 1. **第一名是纠错或模糊音兜底的词时，句首词和单字按它的音节对齐，全被筛掉**（`prefix_on_syllable_boundaries`）。
    `yusezhi`：第一名「越职」是删掉 s 纠出来的（yue zhi），yu、yu se 一个边界都对不上，句首词（语塞、雨……）全没了，
@@ -225,16 +225,46 @@ scripts/invariants.sh /usr/share/wowtype --inv-limit 0                      # �
    补全的「结算」压在「借宿」前面（锚点现在不认模糊音）；它只认第一个打全了的词，`fangxiangji` 第一个是「放像机」时补全的
    「方向键」照样压在「芳香剂」前面（新加 `completions_after_exact_words`，补全的排到所有打全了的常用词后面）；束搜索名额被补全占满时，
    打全了的「请款」（qingkuan）从长尾补进来，以前插在全部补全候选后面（`append_more_candidates`，现在插在补全前面）。对应 P7。
-9. 排序评测因此**涨了**：`trunc_exact` 96.7% → 98.4%，`mid` 93.8% → 94.1%，其余各组持平，`tools/eval/baseline.tsv` 已更新。
+9. **纠错出来的开头词放到第二位**（`compose_candidates`）。四个音节以上时第二位放第一名的开头词；第一名是纠错的整句时
+   （接着「我本地」打 `jidegeimamadadianhu`，带模型时第一个是「借给妈妈打电话」），开头的「借给…」也是纠错的，压在照着打的
+   「记得给麻麻打电话」前面。现在开头词是纠错的时不放第二位。
+10. 排序评测因此**涨了**：`trunc_exact` 96.7% → 98.4%，`mid` 93.8% → 94.1%，其余各组持平，`tools/eval/baseline.tsv` 已更新。
 
 每一处都有单元测试（`typos_never_end_up_ahead_of_the_typed_reading`、
 `prefix_words_follow_the_typed_syllables_when_the_top_is_a_correction`、`typed_prefixes_stay_when_the_top_is_a_correction`、
 `fuzzy_fallback_word_does_not_drop_the_typed_sentence`、`a_corrected_word_does_not_drop_typed_sentences_as_junk`、
-`typed_reading_of_a_char_survives_a_cheaper_correction`、`completions_go_after_every_exact_word`）。
+`typed_reading_of_a_char_survives_a_cheaper_correction`、`completions_go_after_every_exact_word`、
+`a_corrected_head_word_does_not_take_the_second_slot`）。
 
 ### 修之后
 
-NNLM_AFTER_PLACEHOLDER
+同样的数据和条件（每个前缀不带上文、带用例的上文、带「我本地」各查一次）：
+
+| 规则 | 不带模型（CI） | 带 `nnlm.bin` |
+|---|---:|---:|
+| `typed-first` / `typed-first-partial` | 0 / 0 | 0 / 0 |
+| `first-syllable-chars` | 0 | 0 |
+| `min-candidates` | 0 | 0 |
+| `typed-kept` | 0 | 0 |
+| `no-duplicates` | 0 | 0 |
+| `completion-outranks-word` | 0 | 0 |
+| `typo-only-adds` / `typo-outranks-typed` | 0 / 0 | 4 / 0 |
+| `fuzzy-only-adds` | 0 | 0 |
+| `jianpin-only-adds` / `jianpin-outranks-typed` | 0 / 0 | 0 / 0 |
+| `fuzzy-outranks-typed`（只报告） | 57 | 144 |
+
+带模型那一列是在最后一处修改（`compose_candidates` 不把纠错出来的开头词放到第二位）之前跑的，那时还有一条
+`typo-outranks-typed`：接着「我本地」打 `jidegeimamadadianhu`，第一个是纠错的「借给妈妈打电话」（音节更少，按例外可以第一），
+它的开头「借给…」也是纠错的，被放到第二位，压在照着打的「记得给麻麻打电话」前面。修了以后用 `wowtype-show` 核对过
+（照着打的整句排第二），排序评测不变；带模型的整套检查没有在最后这次修改之后重跑。
+
+### 还没修的
+
+带模型、接着上文打时的 4 条 `typo-only-adds`（`lingjias`、`biwans`、`duochuang`、`wanshir`）：关掉纠错时第一页有的
+句首词（`lingjias` 的「另计」「灵机」「零级」）开着时没了。查下来不是纠错替换了照着打的东西，而是开关纠错时排第一的
+**照着打的读法**换了一个（「另加上」ling jia shang 和「零假设」ling jia she），`prefix_on_syllable_boundaries` 按第一名的切法筛句首词，
+「灵机」是 ling ji | a s 这种换切法才对得上的词，跟着第一名的切法时有时无。不带模型时不出现，所以 CI 不拦。
+建议的修法就是第 7 节第 4 条：句首词不按第一名的切法筛，从输入开头起、落在任一种照着打的切法的音节边界上的词都留。
 
 ### 等决定：模糊音兜底要不要也「只加不抢第一」
 

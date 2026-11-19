@@ -3226,7 +3226,11 @@ fn compose_candidates(result: &mut Vec<Candidate>, prefix: Vec<Candidate>, max: 
             kept.insert(1, word);
         }
     }
-    let long_sentence = syllables >= 4 && kept.first().map(is_sentence).unwrap_or(false);
+    // 第一名是纠错出来的整句时（接着上文打 jidegeimamadadianhu，第一个是「借给妈妈打电话」），它的开头「借给」也是纠错的，
+    // 不放到第二位去压照着打的「记得给妈妈打电话」
+    let head_corrected = prefix.first().is_some_and(|p| p.features.typo_count > 0.0);
+    let long_sentence =
+        syllables >= 4 && !head_corrected && kept.first().map(is_sentence).unwrap_or(false);
     let mut merged: Vec<Candidate> =
         Vec::with_capacity(kept.len() + prefix.len() + corrected.len());
     let mut prefix = prefix.into_iter();
@@ -5623,6 +5627,34 @@ mod tests {
         let mut result = vec![corrected, typed];
         compose_candidates(&mut result, Vec::new(), 10);
         assert!(result.iter().any(|c| c.text == "没雨哦"));
+    }
+
+    #[test]
+    fn a_corrected_head_word_does_not_take_the_second_slot() {
+        // 第一名是纠错出来的长整句时，它的开头词也是纠错的，不放到第二位压照着打的整句
+        let sentence = |text: &str, words: &[(&str, &str)], typos: f32, score: f64| {
+            let mut c = ranked(text, "", typos, 8);
+            c.words = words
+                .iter()
+                .map(|(t, p)| CandidateWord {
+                    text: t.to_string(),
+                    pinyin: p.to_string(),
+                    freq: 1000.0,
+                    known: true,
+                })
+                .collect();
+            c.pinyin = words.iter().map(|w| w.1).collect::<Vec<_>>().join(" ");
+            c.score = score;
+            c
+        };
+        let corrected = sentence("借给妈妈", &[("借给", "jie gei"), ("妈妈", "ma ma")], 1.0, -10.0);
+        let typed = sentence("记得给妈妈", &[("记得", "ji de"), ("给", "gei"), ("妈妈", "ma ma")], 0.0, -12.0);
+        let mut head = ranked("借给", "jie gei", 1.0, 4);
+        head.score = -11.0;
+        let mut result = vec![corrected, typed];
+        compose_candidates(&mut result, vec![head], 10);
+        let texts: Vec<&str> = result.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts[1], "记得给妈妈", "{texts:?}");
     }
 
     #[test]
