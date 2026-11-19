@@ -135,7 +135,7 @@
 | `typo-only-adds` | **用户的规矩**：把按错键纠错关掉再查一次，关掉时第一页的词（整词、句首词、单字）开着时都还在，关掉时排第一的照着打的读法开着时也还在（是几个词拼的整句时，至少还有一个照着打的读法） | P1、P3 |
 | `typo-outranks-typed` | 关掉纠错时排第一的照着打的读法，开着时不排在纠错加进来的候选后面（音节更少的例外，同 `typed-first`） | P1 |
 | `fuzzy-only-adds` | 同 `typo-only-adds`，关的是模糊音兜底 | P1 |
-| `fuzzy-outranks-typed` | 同 `typo-outranks-typed`，关的是模糊音兜底。**只报告、不算失败**，见第 6 节「等决定」 | P1 |
+| `fuzzy-outranks-word` | 照着打的读法本身是词库里一个够常用的词（词频 ≥ 1000）时，模糊音兜底的词不排在它前面（`penyou` 出「喷油」「朋友」）。照着打只能几个字硬凑时（`shengme`）模糊音的词可以排第一，见第 6 节「模糊音兜底」 | P6 |
 | `jianpin-only-adds`、`jianpin-outranks-typed` | 同上，关的是简拼；只查打全了的输入（`zg`、`wm` 本来就没有照着打的全拼读法，简拼就是照着打的） | P1 |
 
 纠错、模糊音兜底、简拼三条是对比着查的：开着时前两页里有它加进来的候选，就把它关掉（`set_typo_correction`、
@@ -249,14 +249,10 @@ scripts/invariants.sh /usr/share/wowtype --inv-limit 0                      # �
 | `no-duplicates` | 0 | 0 |
 | `completion-outranks-word` | 0 | 0 |
 | `typo-only-adds` / `typo-outranks-typed` | 0 / 0 | 4 / 0 |
-| `fuzzy-only-adds` | 0 | 0 |
+| `fuzzy-only-adds` / `fuzzy-outranks-word` | 0 / 0 | 0 / 0 |
 | `jianpin-only-adds` / `jianpin-outranks-typed` | 0 / 0 | 0 / 0 |
-| `fuzzy-outranks-typed`（只报告） | 57 | 144 |
 
-带模型那一列是在最后一处修改（`compose_candidates` 不把纠错出来的开头词放到第二位）之前跑的，那时还有一条
-`typo-outranks-typed`：接着「我本地」打 `jidegeimamadadianhu`，第一个是纠错的「借给妈妈打电话」（音节更少，按例外可以第一），
-它的开头「借给…」也是纠错的，被放到第二位，压在照着打的「记得给麻麻打电话」前面。修了以后用 `wowtype-show` 核对过
-（照着打的整句排第二），排序评测不变；带模型的整套检查没有在最后这次修改之后重跑。
+两列都是在全部修改（包括下面「模糊音兜底」那一处）之后重跑的。
 
 ### 还没修的
 
@@ -266,13 +262,18 @@ scripts/invariants.sh /usr/share/wowtype --inv-limit 0                      # �
 「灵机」是 ling ji | a s 这种换切法才对得上的词，跟着第一名的切法时有时无。不带模型时不出现，所以 CI 不拦。
 建议的修法就是第 7 节第 4 条：句首词不按第一名的切法筛，从输入开头起、落在任一种照着打的切法的音节边界上的词都留。
 
-### 等决定：模糊音兜底要不要也「只加不抢第一」
+### 模糊音兜底：照着打是现成的词时让位（用户定的）
 
-模糊音关着时，第一名偏弱就由 `fuzzy_fallback` 补一两个模糊音的词，分数高出一截就排第一：`zhouba` 第一是「走吧」，
-照着打的「周报」第二；`lindai` 第一是「领带」，照着打的「林带」第二。按用户的规矩，这也是「替代」。但回归集
-（`tools/eval/regress.tsv` 第 82、83 条）明确要求 `shengme` → 什么、`penyou` → 朋友 排第一，改成只加这两条就失败。
-所以现在：模糊音兜底**只加不删**是硬规则（`fuzzy-only-adds`，已经清零），**排到照着打的前面**只报告（`fuzzy-outranks-typed`，
-不带模型约 57 条）。要改的话：`typos_after_typed` 的 `yields` 加上 `c.features.fuzzy`（试过，其余各组不变），同时改回归集那两条。
+模糊音关着时，第一名偏弱就由 `fuzzy_fallback` 补一两个模糊音的词，分数高出一截就排第一。这有两种情况，用户定的规矩是分开对待：
+
+- **照着打的读法本身是词库里一个够常用的词**（词频 ≥ `EXACT_PROTECT_MIN_FREQ`）：它排第一，模糊音的词紧跟在后面。
+  `penyou`：喷油、朋友；`zuijing`：最精、最近；`lindai`：林带、领带；`tiexiang`：铁箱、贴现。照着打的没打错，模糊音的词只是「加」。
+- **照着打只能几个字硬凑**（词库里没有这个读音的词，或者只有补全才凑得出词）：模糊音的词照旧排第一。
+  `shengme`：什么（没有 sheng me 这个词，「声门」是补全）；`zhouba`：走吧（「周报」是 zhou bao，补全出来的）；`heishe`：黑色。
+
+实现是 `fuzzy_after_exact_word`（`lib.rs`，和 `completions_after_exact_words` 用同一个「打全了的常用词」的判断）；用户选过的模糊音词不挪。
+检查是硬规则 `fuzzy-outranks-word`。以前只报告的 `fuzzy-outranks-typed`（57 条）去掉了：里面除了上面第一种的几条，都是第二种，按规矩是对的。
+回归集相应改了：`penyou` 期望「喷油」第一、「朋友」前两名，加了 `zuijing`；`shengme` → 什么 不变。排序评测其余各组不变（`mid` 多对一条）。
 
 ### 其它几种机制
 

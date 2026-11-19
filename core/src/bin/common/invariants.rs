@@ -37,13 +37,9 @@ use wowtype_core::{
     SyllableQuery,
 };
 
-/// 只报告、不算失败的规则：模糊音兜底的词排到照着打的读法前面（`penyou` -> 朋友、`shengme` -> 什么）
-/// 是回归集定死的现有行为，要不要也改成「只加」等用户定，见 docs/ENGINE-INVARIANTS.md。
-const REPORT_ONLY: [&str; 1] = ["fuzzy-outranks-typed"];
-
 /// 一页候选的个数（min-candidates 的上限）。
 const PAGE: usize = 9;
-/// completion-outranks-word 只管这么常用以上的词（和引擎的 `EXACT_PROTECT_MIN_FREQ` 一样）。
+/// completion-outranks-word、fuzzy-outranks-word 只管这么常用以上的词（和引擎的 `EXACT_PROTECT_MIN_FREQ` 一样）。
 const EXACT_WORD_FREQ: f64 = 1000.0;
 
 pub struct Options {
@@ -373,6 +369,23 @@ fn check_one(
                     ),
                 );
             }
+            // fuzzy-outranks-word：同样的词也不排在模糊音兜底的词后面（penyou 出「喷油」「朋友」）。照着打
+            // 只能几个字硬凑时（shengme）模糊音的词可以排第一，那是用户定的，不查
+            let ahead: Vec<&str> = cands[..at]
+                .iter()
+                .filter(|c| c.features.fuzzy)
+                .map(|c| c.text.as_str())
+                .collect();
+            if !ahead.is_empty() {
+                report(
+                    "fuzzy-outranks-word",
+                    format!(
+                        "照着打的词「{}」排在模糊音兜底的「{}」后面",
+                        cands[at].text,
+                        ahead.join("」「")
+                    ),
+                );
+            }
         }
     }
     // min-candidates
@@ -468,7 +481,8 @@ fn only_adds(
             ("typo", "adds") => "typo-only-adds",
             ("typo", _) => "typo-outranks-typed",
             ("fuzzy", "adds") => "fuzzy-only-adds",
-            ("fuzzy", _) => "fuzzy-outranks-typed",
+            // 模糊音的「排到前面」不在这里查：照着打是现成的词时归 fuzzy-outranks-word，硬凑时允许
+            ("fuzzy", _) => "fuzzy-outranks-word",
             (_, "adds") => "jianpin-only-adds",
             _ => "jianpin-outranks-typed",
         }
@@ -505,6 +519,9 @@ fn only_adds(
     let Some(top) = top else {
         return;
     };
+    if mechanism.name == "fuzzy" {
+        return;
+    }
     // 开着时它前面的、加进来的候选：比到它和开着时第一个照着打的读法里靠前的那个
     let Some(at) = on
         .iter()
@@ -745,9 +762,7 @@ pub fn run(
             used_allow.insert(v.key());
             continue;
         }
-        if !REPORT_ONLY.contains(&v.rule) {
-            new_count += 1;
-        }
+        new_count += 1;
         match by_rule.iter_mut().find(|(r, _)| *r == v.rule) {
             Some((_, list)) => list.push(v),
             None => by_rule.push((v.rule, vec![v])),
@@ -765,7 +780,7 @@ pub fn run(
         "typo-only-adds",
         "typo-outranks-typed",
         "fuzzy-only-adds",
-        "fuzzy-outranks-typed",
+        "fuzzy-outranks-word",
         "jianpin-only-adds",
         "jianpin-outranks-typed",
     ];
@@ -781,17 +796,12 @@ pub fn run(
             .filter(|v| v.rule == rule && allow.contains_key(&v.key()))
             .count();
         println!(
-            "{rule:<24} 违反 {}{}{}",
+            "{rule:<24} 违反 {}{}",
             list.len(),
             if allowed > 0 {
                 format!("（另有 {allowed} 条在已知清单里）")
             } else {
                 String::new()
-            },
-            if REPORT_ONLY.contains(&rule) {
-                "（只报告，不算失败，见 docs/ENGINE-INVARIANTS.md）"
-            } else {
-                ""
             }
         );
         let shown = if opts.limit == 0 {

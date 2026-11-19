@@ -279,7 +279,8 @@ d 在 c 上面，「的」「得」的词频、神经语言模型给的分比固
 - 第一名是纠错出来的时，句首词也按照着打的读法的音节边界对齐（`prefix_on_syllable_boundaries`）：
   `yusezhi` 的第一名「越职」（yue zhi）一个边界都对不上字母，以前句首词和 yu 的单字全被筛掉，整个候选框只有 6 个。
 
-- 模糊音关着时兜底补进来的词（`fuzzy_fallback`：`penyou` → 朋友）带标记 `Feature::fuzzy`（不是排序特征）。
+- 模糊音关着时兜底补进来的词（`fuzzy_fallback`：`shengme` → 什么）带标记 `Feature::fuzzy`（不是排序特征）。照着打的读法本身是词库里的常用词时
+  它排在那个词后面（`fuzzy_after_exact_word`：`penyou` 出「喷油」「朋友」），只能硬凑时才排第一。
   它排第一时不当「打全了的整词」，`compose_candidates` 不拿它去筛硬凑的整句：接着上文打 `ninke` 时补进来的「宁可」
   曾经把照着打的「您可」整个筛掉。
 

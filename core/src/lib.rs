@@ -1248,6 +1248,7 @@ impl Engine {
         protect_exact_input(&mut result);
         completions_after_exact_words(&mut result);
         typos_after_typed(&mut result);
+        fuzzy_after_exact_word(&mut result);
         promote_picked(&mut result);
         pin_single_initial(&normalized, &mut result);
         self.promote_custom(&mut result);
@@ -2635,22 +2636,53 @@ fn typos_after_typed(candidates: &mut Vec<Candidate>) {
     *candidates = keep;
 }
 
+/// 照着打、打全了、整个输入正好是词库里一个够常用的词（[`EXACT_PROTECT_MIN_FREQ`]）。
+fn is_exact_frequent_word(c: &Candidate) -> bool {
+    c.words.len() == 1
+        && c.words[0].known
+        && c.words[0].freq >= EXACT_PROTECT_MIN_FREQ
+        && c.features.coverage_score >= 1.0
+        && c.features.typo_count == 0.0
+        && c.features.prefix_completion == 0.0
+        && c.features.full_jianpin == 0.0
+        && !c.features.fuzzy
+}
+
+/// 照着打的读法本身就是词库里一个够常用的词时，模糊音兜底的词排在第一个这样的词后面
+/// （`penyou`：喷油、朋友；`zuijing`：最精、最近）。
+///
+/// 照着打只能几个字硬凑（`shengme` 没有 sheng me 这个词）时不动，模糊音的词照旧排第一（什么）：
+/// 那时它多半才是用户要的。用户选过的模糊音词也不动。
+fn fuzzy_after_exact_word(candidates: &mut Vec<Candidate>) {
+    let Some(first) = candidates.iter().position(is_exact_frequent_word) else {
+        return;
+    };
+    let yields = |c: &Candidate| c.features.fuzzy && c.features.history_use_count == 0.0;
+    if !candidates[..first].iter().any(yields) {
+        return;
+    }
+    let mut moved = Vec::new();
+    let mut keep = Vec::with_capacity(candidates.len());
+    for (i, c) in candidates.drain(..).enumerate() {
+        if i < first && yields(&c) {
+            moved.push(c);
+        } else {
+            keep.push(c);
+        }
+    }
+    let at = keep.iter().position(is_exact_frequent_word).map_or(keep.len(), |i| i + 1);
+    keep.splice(at..at, moved);
+    make_scores_monotonic(&mut keep);
+    *candidates = keep;
+}
+
 /// 打全了、整个输入正好是一个够常用的词（[`EXACT_PROTECT_MIN_FREQ`]）时，补全出来的候选都排在这些词后面。
 ///
 /// [`protect_exact_input`] 只认第一个这样的词：它已经排第一时什么都不挪。`fangxiangji` 第一个是「放像机」，
 /// 补全的「方向键」（jian）就一直压在同样打全了的「芳香剂」前面。补全只能「加」候选，不能抢打全了的词的位置。
 /// 用户选过的补全不挪。
 fn completions_after_exact_words(candidates: &mut Vec<Candidate>) {
-    let exact_word = |c: &Candidate| {
-        c.words.len() == 1
-            && c.words[0].known
-            && c.words[0].freq >= EXACT_PROTECT_MIN_FREQ
-            && c.features.coverage_score >= 1.0
-            && c.features.typo_count == 0.0
-            && c.features.prefix_completion == 0.0
-            && c.features.full_jianpin == 0.0
-            && !c.features.fuzzy
-    };
+    let exact_word = is_exact_frequent_word;
     let Some(last) = candidates.iter().rposition(exact_word) else {
         return;
     };
@@ -5655,6 +5687,43 @@ mod tests {
         compose_candidates(&mut result, vec![head], 10);
         let texts: Vec<&str> = result.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts[1], "记得给妈妈", "{texts:?}");
+    }
+
+    #[test]
+    fn fuzzy_word_goes_after_a_typed_whole_word() {
+        // penyou：照着打的「喷油」是词库里的词，模糊音兜底的「朋友」排它后面
+        let mut fuzzy = ranked("朋友", "pen you", 0.0, 6);
+        fuzzy.features.fuzzy = true;
+        fuzzy.score = -5.0;
+        let mut typed = ranked("喷油", "pen you", 0.0, 6);
+        typed.score = -9.0;
+        let mut list = vec![fuzzy.clone(), typed.clone()];
+        fuzzy_after_exact_word(&mut list);
+        let texts: Vec<&str> = list.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["喷油", "朋友"]);
+        assert!(list[0].score >= list[1].score);
+
+        // shengme：照着打只能两个字硬凑，模糊音的「什么」照旧排第一
+        typed.words = ["生", "么"]
+            .iter()
+            .zip(["sheng", "me"])
+            .map(|(t, p)| CandidateWord {
+                text: t.to_string(),
+                pinyin: p.into(),
+                freq: 1000.0,
+                known: true,
+            })
+            .collect();
+        let mut list = vec![fuzzy.clone(), typed.clone()];
+        fuzzy_after_exact_word(&mut list);
+        assert_eq!(list[0].text, "朋友");
+
+        // 用户选过的模糊音词不挪
+        typed = ranked("喷油", "pen you", 0.0, 6);
+        fuzzy.features.history_use_count = 1.0;
+        let mut list = vec![fuzzy, typed];
+        fuzzy_after_exact_word(&mut list);
+        assert_eq!(list[0].text, "朋友");
     }
 
     #[test]
