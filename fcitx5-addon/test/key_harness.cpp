@@ -431,7 +431,7 @@ void runCases(Instance &instance) {
     }
 #else
     std::printf("skip 候选右键菜单：fcitx5 %s 没有 ActionableCandidateList（5.1.10 起）\n",
-                Instance::version().c_str());
+                std::string(Instance::version()).c_str());
 #endif
 
     // 打字途中会话不管的键（小键盘的 + - * / .、F 键、Insert、不是 ASCII 的键……）都吃掉：
