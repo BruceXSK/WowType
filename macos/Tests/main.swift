@@ -897,6 +897,7 @@ do {
     all.toggleKey = Shortcut(name: "Control+space")
     all.translateModeKey = Shortcut(name: "Control+Shift+Y")
     all.voiceKey = "F8"
+    all.voiceSilenceTimeout = 0
     all.translateTarget = "ja"
     all.translateBaseUrl = "http://127.0.0.1:11434/v1"
     all.translateModel = "qwen 2.5"
@@ -2119,7 +2120,11 @@ do {
     check(VoiceKey(name: "Menu") == nil && VoiceKey(name: "") == nil && VoiceKey(name: "none") == nil,
           "Mac 上没有的键、留空：不用语音键")
     let c = WowtypeConfig.parse("Voice=False\nVoiceKey=F9\nVoiceCopy=True")
-    check(!c.voice && c.voiceKey == "F9" && c.voiceCopy, "读语音设置")
+    check(!c.voice && c.voiceKey == "F9" && c.voiceCopy && c.voiceSilenceTimeout == 1500, "读语音设置")
+    check(WowtypeConfig.parse("VoiceSilenceTimeout=0").voiceSilenceTimeout == 0
+              && WowtypeConfig.parse("VoiceSilenceTimeout=10000").voiceSilenceTimeout == 10000
+              && WowtypeConfig.parse("VoiceSilenceTimeout=999999").voiceSilenceTimeout == 60000,
+          "读停顿多久自动结束（0 不自动结束，超出夹到 60000）")
     check(voiceWave([]) == "▁▁▁▁▁▁" && voiceWave([100, 0]) == "▁▁▁▁█▁"
           && voiceWave([0, 10, 20, 30, 40, 50, 60]).count == 6, "音量画成 6 个竖条（和 Linux 一样）")
 }

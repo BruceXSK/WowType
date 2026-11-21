@@ -123,7 +123,7 @@ void EngineHost::loadConfig() {
         ++configGeneration_;
         applyTranslateSettings();
         voice_.configure(config_.flag("Voice"), config_.value("VoiceKey"), config_.flag("VoiceCopy"),
-                         narrow(voiceModelDir()));
+                         narrow(voiceModelDir()), config_.number("VoiceSilenceTimeout"));
         if (stats_) {
             // 关掉时记录器丢掉内存里还没写的计数，以后什么都不记
             wowtype_stats_set_enabled(stats_, config_.flag("TypingStats"));

@@ -50,6 +50,23 @@ public struct VoiceKey: Equatable, Sendable {
     ]
 }
 
+/// 「停顿多久自动结束」（VoiceSilenceTimeout，毫秒，#285）：名字、选项、说明和 Linux、Windows 的设置一样
+/// （spec/config.json，契约测试对照）。
+public enum VoiceSilence {
+    public static let title = "停顿多久自动结束"
+    public static let info = "点按说话时没声音多久就自动结束；选「不自动结束」时再点一下语音键结束。"
+        + "一次最长录 2 分钟，到了也会结束。长按说话松开就结束，不受这一项影响。"
+    public static let choices: [(label: String, value: Int)] = [
+        ("1.5 秒", 1500), ("3 秒", 3000), ("5 秒", 5000), ("10 秒", 10000), ("30 秒", 30000), ("不自动结束", 0),
+    ]
+
+    /// 设置窗口下拉框的 (名字, 值)：文件里写了别的数（2000）时多一项「其他（2000 毫秒）」
+    public static func options(current: Int) -> [(String, Int)] {
+        let list = choices.map { ($0.label, $0.value) }
+        return list.contains { $0.1 == current } ? list : list + [("其他（\(current) 毫秒）", current)]
+    }
+}
+
 /// 正在听时音量画成一排竖条（和 Linux 插件的 voiceWave 一样，不足 6 个时左边补最低的）。
 public func voiceWave(_ levels: [Int]) -> String {
     let bars = Array("▁▂▃▄▅▆▇█")

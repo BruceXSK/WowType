@@ -731,6 +731,11 @@ private struct VoicePage: View {
             PickerRow(title: "语音键", selection: $model.config.voiceKey, options: voiceKeyOptions)
                 .disabled(!ready || !model.config.voice)
             RowDivider()
+            PickerRow(title: VoiceSilence.title, subtitle: VoiceSilence.info,
+                      selection: $model.config.voiceSilenceTimeout,
+                      options: VoiceSilence.options(current: model.config.voiceSilenceTimeout))
+                .disabled(!ready || !model.config.voice)
+            RowDivider()
             SwitchRow(title: "同时复制到剪贴板", isOn: $model.config.voiceCopy)
                 .disabled(!ready || !model.config.voice)
         }

@@ -371,6 +371,17 @@ int main(int argc, char **argv) {
         check(code && strcmp(code, "ni hao") == 0, "custom code: guess pinyin");
     }
 
+    /* ABI 1.16：点按说话的静音超时（只建句柄，不开麦克风、不读模型）；NULL 什么也不做 */
+    {
+        WowtypeVoice *voice = wowtype_voice_new("/nonexistent/wowtype-abi-smoke");
+        wowtype_voice_set_silence_timeout(voice, 0);
+        wowtype_voice_set_silence_timeout(voice, 5000);
+        wowtype_voice_set_silence_timeout(NULL, 1500);
+        check(wowtype_voice_poll(voice) == WOWTYPE_VOICE_IDLE, "voice: silence timeout keeps idle");
+        check(wowtype_voice_is_tap(voice) == 0, "voice: not tapping");
+        wowtype_voice_free(voice);
+    }
+
     if (wowtype_abi_version() / 1000 != WOWTYPE_ABI_VERSION_MAJOR) {
         fprintf(stderr, "ABI 主版本不一致：库 %d，头文件 %d\n", wowtype_abi_version(),
                 WOWTYPE_ABI_VERSION_MAJOR);

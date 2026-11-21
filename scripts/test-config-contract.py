@@ -126,6 +126,16 @@ def check_spec(spec, pack):
             values = enum_values(s)
             check(len(values) == len(set(values)), f"规格：{key} 的可选值重复", values)
             check(default in values, f"规格：{key} 的默认值不在可选值里", default)
+        if "choices" in s:
+            # 数字项的下拉框（VoiceSilenceTimeout）：选项在范围里、不重复、有默认值，三端用同一套名字和说明
+            values = [c["value"] for c in s["choices"]]
+            check(kind == "int", f"规格：{key} 的 choices 只给数字项用")
+            check(len(values) == len(set(values)), f"规格：{key} 的 choices 重复", values)
+            check(default in values, f"规格：{key} 的默认值不在 choices 里", values)
+            check(all(type(v) is int and s["min"] <= v <= s["max"] for v in values),
+                  f"规格：{key} 的 choices 不在 {s['min']}–{s['max']} 里", values)
+            check(all(c.get("name") for c in s["choices"]) and s.get("title") and s.get("info"),
+                  f"规格：{key} 的 choices 要有 name，还要写 title、info")
         for end, presets in s.get("presets", {}).items():
             check(end in s["platforms"], f"规格：{key} 的 presets 写了没有这一项的 {end}")
             check(default_for(s, end) in presets, f"规格：{key} 在 {end} 的默认值不在 presets 里", presets)
@@ -311,6 +321,11 @@ def check_settings(spec, wc, home):
         same(wc.translate_engine(values), engine[want], f"设置界面：{values} 是「{want}」")
     same([value for _label, value in wc.EMOJI_KEYS], by_key["EmojiKey"]["presets"]["settings"],
          "设置界面：EMOJI_KEYS")
+    silence = by_key["VoiceSilenceTimeout"]
+    same(wc.VOICE_SILENCE_TIMEOUTS, [(c["name"], str(c["value"])) for c in silence["choices"]],
+         "设置界面：VoiceSilenceTimeout 的选项（VOICE_SILENCE_TIMEOUTS）")
+    same((wc.VOICE_SILENCE_TITLE, wc.VOICE_SILENCE_INFO), (silence["title"], silence["info"]),
+         "设置界面：VoiceSilenceTimeout 的名字和说明")
     same([value for _label, value in wc.VOICE_KEYS], by_key["VoiceKey"]["presets"]["settings"],
          "设置界面：VOICE_KEYS")
     same([value for _label, value in wc.TOGGLE_KEYS], by_key["ToggleKey"]["presets"]["settings"],
@@ -573,6 +588,13 @@ def check_windows(spec, exe):
             same(values.get(key), file_text(case["expect"]), f"windows：文件是 {case['file']} 时 {key}")
     look = run_dump(exe, "--look")
     by_key = {s["key"]: s for s in spec["settings"]}
+    # 语音页的「停顿多久自动结束」下拉框（common/config.h 的 voiceSilenceChoices），名字、说明和别的端一样
+    silence = by_key["VoiceSilenceTimeout"]
+    voice = run_dump(exe, "--voice")
+    same([(c["value"], c["name"]) for c in voice["silenceChoices"]],
+         [(c["value"], c["name"]) for c in silence["choices"]], "windows：VoiceSilenceTimeout 的选项")
+    same((voice["silenceTitle"], voice["silenceInfo"]), (silence["title"], silence["info"]),
+         "windows：VoiceSilenceTimeout 的名字和说明")
     same([(t["name"], t["value"]) for t in look["themes"]],
          [(v["name"], v["value"]) for v in by_key["SettingsTheme"]["values"]], "windows：设置窗口主题的名字")
     same([(a["name"], a["value"], a["color"], a["strong"], a["light"]) for a in look["accents"]],

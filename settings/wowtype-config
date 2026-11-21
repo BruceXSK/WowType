@@ -375,6 +375,8 @@ DEFAULTS = {
     "Voice": "True",
     "VoiceCopy": "False",
     "VoiceKey": "Alt_R",
+    # 点按说话时没声音多久自动结束，毫秒；0 不自动结束（见 VOICE_SILENCE_TIMEOUTS）
+    "VoiceSilenceTimeout": "1500",
     "EmojiSuggest": "True",
     "EmojiKey": "Super+period",
     "ToggleKey": "",
@@ -403,6 +405,7 @@ DEFAULTS = {
 RANGES = {
     "PageSize": (3, 9),
     "TranslateIdleMinutes": (0, 240),
+    "VoiceSilenceTimeout": (0, 60000),
 }
 
 # 互译语言（存盘名和插件的 WowtypeTranslateTarget、core/src/translate.rs 的 LANGUAGES 一致）
@@ -1046,6 +1049,28 @@ VOICE_KEYS = [
     ("F9", "F9"),
     ("F10", "F10"),
 ]
+
+# 「停顿多久自动结束」（VoiceSilenceTimeout，毫秒）：名字、选项、说明和 macOS、Windows 的设置一样（spec/config.json）
+VOICE_SILENCE_TITLE = "停顿多久自动结束"
+VOICE_SILENCE_INFO = ("点按说话时没声音多久就自动结束；选「不自动结束」时再点一下语音键结束。"
+                      "一次最长录 2 分钟，到了也会结束。长按说话松开就结束，不受这一项影响。")
+VOICE_SILENCE_TIMEOUTS = [
+    ("1.5 秒", "1500"),
+    ("3 秒", "3000"),
+    ("5 秒", "5000"),
+    ("10 秒", "10000"),
+    ("30 秒", "30000"),
+    ("不自动结束", "0"),
+]
+
+
+def voice_silence_options(current):
+    """下拉框的 (名字, 值)：文件里写了别的数（2000）时多一项「其他（2000 毫秒）」。"""
+    options = list(VOICE_SILENCE_TIMEOUTS)
+    if current not in [value for _label, value in options]:
+        options.append((f"其他（{current} 毫秒）", current))
+    return options
+
 
 EMOJI_KEYS = [
     ("Super + .", "Super+period"),
@@ -6824,6 +6849,17 @@ class SettingsWindow(Adw.ApplicationWindow):
         self.switches["Voice"].bind_property("active", self.key_row, "sensitive",
                                              GObject.BindingFlags.SYNC_CREATE)
         group.add(self.key_row)
+
+        silence = voice_silence_options(self.values["VoiceSilenceTimeout"])
+        self.voice_silence_values = [value for _label, value in silence]
+        self.silence_row = Adw.ComboRow(title=VOICE_SILENCE_TITLE, subtitle=VOICE_SILENCE_INFO,
+                                        model=Gtk.StringList.new([label for label, _ in silence]))
+        self.silence_row.set_selected(self.voice_silence_values.index(self.values["VoiceSilenceTimeout"]))
+        self.silence_row.connect("notify::selected", lambda row, _p: self.set_value(
+            "VoiceSilenceTimeout", self.voice_silence_values[row.get_selected()]))
+        self.switches["Voice"].bind_property("active", self.silence_row, "sensitive",
+                                             GObject.BindingFlags.SYNC_CREATE)
+        group.add(self.silence_row)
         copy_row = self.make_switch("VoiceCopy", "同时复制到剪贴板", "要装 wl-clipboard 或 xclip")
         self.switches["Voice"].bind_property("active", copy_row, "sensitive",
                                              GObject.BindingFlags.SYNC_CREATE)
