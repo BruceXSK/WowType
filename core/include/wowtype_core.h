@@ -16,7 +16,7 @@
  * 删函数或改参数含义时升主版本。外壳启动时用 wowtype_abi_version() 比对主版本。
  * 规则见 docs/ABI.md。 */
 #define WOWTYPE_ABI_VERSION_MAJOR 1
-#define WOWTYPE_ABI_VERSION_MINOR 15
+#define WOWTYPE_ABI_VERSION_MINOR 16
 
 #ifdef __cplusplus
 extern "C" {
@@ -260,7 +260,8 @@ const char *wowtype_version(void);
  *
  * 用法：热键按下/松开调 key_down/key_up；录音期间每几十毫秒调一次 poll，
  * 按返回的状态显示提示或上屏 wowtype_voice_text。
- * 按住超过 300ms 松开即结束；更短算点按，继续听到静音 1.5 秒或再按一次热键。
+ * 按住超过 300ms 松开即结束；更短算点按，继续听到静音 1.5 秒（wowtype_voice_set_silence_timeout 可改）
+ * 或再按一次热键。单次最长录 2 分钟，到了照常出结果。
  * 设了环境变量 WOWTYPE_VOICE_WAV 时不开麦克风，改读这个 WAV 文件（测试用）。
  */
 typedef struct WowtypeVoice WowtypeVoice;
@@ -300,6 +301,9 @@ int wowtype_voice_level(const WowtypeVoice *voice);
 int wowtype_voice_model_state(const WowtypeVoice *voice);
 /* 松开热键后还在听（点按模式）时返回 1。 */
 int wowtype_voice_is_tap(const WowtypeVoice *voice);
+/* 点按说话时没声音多久自动结束，毫秒（1.16 起），默认 1500。0 是不因静音结束：只有再按一次热键
+ * （或 cancel、到了单次最长录音 2 分钟）才结束。长按说话不受影响。正在听时改了也马上生效。 */
+void wowtype_voice_set_silence_timeout(WowtypeVoice *voice, unsigned int ms);
 
 /*
  * 互译：调用户配置的大模型（OpenAI 格式 chat/completions，流式）把原文译成外文，

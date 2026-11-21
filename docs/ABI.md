@@ -30,6 +30,7 @@
 | 1.13 | 0.7.0 | 核心能在 Windows（MSVC）上编（`core/src/platform.rs`），接口不变；`wowtype_stats_key` 的 `platform` 加 2 = Windows（扫描码，扩展键或上 0xE000，只传按下）；`wowtype_engine_load_history` 和引擎里已有的合并（同一条留最近用过的），`wowtype_engine_load_user_dict` 已经有的词留大的频次，新建的引擎上读和以前一样 |
 | 1.14 | 0.7.2 | 双击 Shift 不切换（#253）：`WowtypeSessionConfig` 末尾加 `shift_double_tap`（默认 0）。开着时单按 Shift 先不切，`frame->wake_after_ms` 叫外壳过一会儿调 `_tick`；0.35 秒以内又单按一下两下都不算（模式不变，没有 `mode_changed`）。没等到第二下：按别的键（`KEY_ACTION_OBSERVE` 也算，这个键照切了以后的模式处理）、到了时间（`_tick`）、第二下没算成单按时切，这些 frame 都可能带 `mode_changed`（打到一半切英文时还有 `commit`），外壳要跟上；`_set_mode` 让等着的那一下作废 |
 | 1.15 | 0.7.2 | 加 `wowtype_engine_set_shuangpin_abbrev`：双拼的简拼（每个键都是声母时当成只打了声母，`sm` -> 什么；同样的键按双拼也读得通时双拼读出来的排在前面，简拼的词只往后加），默认开（#268） |
+| 1.16 | 0.7.5 | 加 `wowtype_voice_set_silence_timeout`：点按说话时没声音多久自动结束（毫秒，默认 1500），0 是不因静音结束，只有再按一次热键、`_cancel` 或到了单次最长录音 2 分钟才结束；长按说话不受影响（#285） |
 
 ## 所有权和生命周期
 

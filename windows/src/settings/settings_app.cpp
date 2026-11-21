@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -143,7 +144,7 @@ const std::vector<Page> &pages() {
                      "FuzzyIn", "FuzzyIan", "FuzzyUan", "FuzzyUn", "FuzzyAnAi", "FuzzyHuangWang", "FuzzyUnIong",
                      "FuzzyEngOng"}},
         {L"标点与表情", {"AutoPairPunct", "EmojiKey", "Toolbar", "ClipboardHistory"}},
-        {L"语音", {"Voice", "VoiceKey", "VoiceCopy"}},
+        {L"语音", {"Voice", "VoiceKey", "VoiceSilenceTimeout", "VoiceCopy"}},
         // TranslateLocal、TranslateBaseUrl、TranslateModel 不单独列：「翻译引擎」下拉框和它下面的框写它们
         // （translate::EngineChoice，和 Linux、macOS 一样）。本地模型的三项只在选了本地翻译时出现（isLocalTranslateKey）
         {L"翻译", {"Translate", "TranslateModeKey", "TranslateTarget", "TranslateFormal", "TranslateLocalModel",
@@ -213,6 +214,7 @@ const std::map<std::string, std::wstring> &labels() {
         {"ClipboardHistory", L"记剪贴板历史（只在内存里）"},
         {"Voice", L"语音输入"},
         {"VoiceKey", L"语音键（Alt_R、Control_R、F8……）"},
+        {"VoiceSilenceTimeout", widen(kVoiceSilenceTitle)},
         {"VoiceCopy", L"识别结果也复制到剪贴板"},
         {"Translate", L"互译（Shift 在中 → 英 → 译之间切）"},
         {"TranslateModeKey", L"进出「译」的快捷键"},
@@ -444,11 +446,18 @@ bool isLocalTranslateKey(const std::string &key) {
     return key == "TranslateLocalModel" || key == "TranslateLlamaServer" || key == "TranslateIdleMinutes";
 }
 
+/// 数字项里用下拉框选的（VoiceSilenceTimeout）：选项见 config.h，和 Linux、macOS 的设置一样
+bool isChoiceKey(const std::string &key) { return key == "VoiceSilenceTimeout"; }
+
 struct Row {
     const SettingDef *def;
     HWND label = nullptr;
     HWND control = nullptr;
+    /// 控件下面一行说明（VoiceSilenceTimeout）
+    HWND note = nullptr;
     int page = 0;
+    /// 下拉框的选项（isChoiceKey）；文件里写了别的数时下拉框多一项「其他」，选它是原来的数
+    std::vector<IntChoice> choices;
 };
 
 class SettingsWindow {
@@ -652,6 +661,18 @@ void SettingsWindow::build() {
             Row row{def};
             row.page = static_cast<int>(p);
             const auto label = labels().count(key) ? labels().at(key) : widen(key);
+            if (isChoiceKey(key)) {
+                // 「停顿多久自动结束」：下拉框选几个常用的值，下面一行说明（和 Linux、macOS 一样）
+                row.label = child(L"STATIC", label.c_str(), SS_LEFT, 0);
+                row.control = child(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, id++);
+                row.choices = voiceSilenceChoices();
+                for (const auto &choice : row.choices) {
+                    SendMessageW(row.control, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(widen(choice.name).c_str()));
+                }
+                row.note = child(L"STATIC", widen(kVoiceSilenceInfo).c_str(), SS_LEFT, 0);
+                rows_.push_back(row);
+                continue;
+            }
             switch (def->type) {
             case SettingType::Bool:
                 row.control = child(L"BUTTON", label.c_str(), BS_AUTOCHECKBOX | WS_TABSTOP, id++);
@@ -794,12 +815,17 @@ void SettingsWindow::layout() {
         }
         if (row.label) {
             MoveWindow(row.label, margin * 2, at + scale(4), scale(250), scale(22), FALSE);
-            const int height = row.def->type == SettingType::Enum ? scale(300) : scale(24);
+            const bool combo = row.def->type == SettingType::Enum || !row.choices.empty();
+            const int height = combo ? scale(300) : scale(24);
             MoveWindow(row.control, margin * 2 + scale(260), at, width - margin * 4 - scale(260), height, FALSE);
         } else {
             MoveWindow(row.control, margin * 2, at, width - margin * 4, scale(24), FALSE);
         }
         at += rowHeight;
+        if (row.note) {
+            MoveWindow(row.note, margin * 2, at, width - margin * 4, scale(48), FALSE);
+            at += scale(52);
+        }
         bottom = std::max(bottom, at);
     }
     // 「翻译」页：上面是互译的开关这些，接着「翻译引擎」和它的说明，下面三个引擎各自的设置排在同一块地方
@@ -911,6 +937,9 @@ void SettingsWindow::showPage(int page) {
         if (row.label) {
             ShowWindow(row.label, show);
         }
+        if (row.note) {
+            ShowWindow(row.note, show);
+        }
     }
     refreshTranslate();
     ShowWindow(nnlm_, page == pageNamed(L"输入") ? SW_SHOW : SW_HIDE);
@@ -938,6 +967,21 @@ void SettingsWindow::load() {
     base_ = text ? Config::parse(*text) : Config();
     for (const auto &row : rows_) {
         const std::string value = base_.value(row.def->key);
+        if (!row.choices.empty()) {
+            // 选项以外的数（文件里写的 2000）：多一项「其他（2000 毫秒）」，上次加的先去掉
+            while (SendMessageW(row.control, CB_GETCOUNT, 0, 0) > static_cast<LRESULT>(row.choices.size())) {
+                SendMessageW(row.control, CB_DELETESTRING, row.choices.size(), 0);
+            }
+            const int n = std::atoi(value.c_str());
+            const auto it = std::find_if(row.choices.begin(), row.choices.end(),
+                                         [n](const IntChoice &c) { return c.value == n; });
+            if (it == row.choices.end()) {
+                SendMessageW(row.control, CB_ADDSTRING, 0,
+                             reinterpret_cast<LPARAM>((L"其他（" + widen(value) + L" 毫秒）").c_str()));
+            }
+            SendMessageW(row.control, CB_SETCURSEL, it - row.choices.begin(), 0);
+            continue;
+        }
         switch (row.def->type) {
         case SettingType::Bool:
             SendMessageW(row.control, BM_SETCHECK, value == "True" ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -968,6 +1012,14 @@ void SettingsWindow::load() {
 Config SettingsWindow::fromControls() const {
     Config config = base_;
     for (const auto &row : rows_) {
+        if (!row.choices.empty()) {
+            // 选了「其他」（最后一项）是文件里原来的数，不改
+            const LRESULT i = SendMessageW(row.control, CB_GETCURSEL, 0, 0);
+            if (i >= 0 && static_cast<std::size_t>(i) < row.choices.size()) {
+                config.setValue(row.def->key, std::to_string(row.choices[static_cast<std::size_t>(i)].value));
+            }
+            continue;
+        }
         switch (row.def->type) {
         case SettingType::Bool:
             config.setValue(row.def->key,

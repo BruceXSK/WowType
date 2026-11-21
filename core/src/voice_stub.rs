@@ -41,3 +41,5 @@ pub unsafe extern "C" fn wowtype_voice_model_state(_voice: *const WowtypeVoice) 
 pub unsafe extern "C" fn wowtype_voice_is_tap(_voice: *const WowtypeVoice) -> c_int {
     0
 }
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_voice_set_silence_timeout(_voice: *mut WowtypeVoice, _ms: u32) {}

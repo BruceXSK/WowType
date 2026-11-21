@@ -155,6 +155,8 @@ const std::vector<SettingDef> &settingDefs() {
         {"Voice", T::Bool, "True"},
         // 语音键用 fcitx5 的键名（Alt_R、F8），原样存（和 macOS 一样），用的时候 VoiceKey::parse 认，认不出就不用热键
         {"VoiceKey", T::Key, "Alt_R"},
+        // 点按说话时没声音多久自动结束，毫秒；0 不自动结束（再点一下语音键结束，核心里最长录 2 分钟）
+        {"VoiceSilenceTimeout", T::Int, "1500", 0, 60000},
         {"VoiceCopy", T::Bool, "False"},
         {"EmojiSuggest", T::Bool, "True"},
         // Win+. 是系统的表情面板，到不了输入法：和 macOS 一样默认 Control+.（Super 当 Control）
@@ -180,6 +182,13 @@ const std::vector<SettingDef> &settingDefs() {
         {"Lexicon", T::String, ""},
     };
     return defs;
+}
+
+const std::vector<IntChoice> &voiceSilenceChoices() {
+    static const std::vector<IntChoice> choices = {
+        {1500, "1.5 秒"}, {3000, "3 秒"}, {5000, "5 秒"}, {10000, "10 秒"}, {30000, "30 秒"}, {0, "不自动结束"},
+    };
+    return choices;
 }
 
 bool impliedTranslateLocal(std::string_view baseUrl) {

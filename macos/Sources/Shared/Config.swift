@@ -258,6 +258,8 @@ public struct WowtypeConfig: Equatable {
     public var voice = true
     /// 语音键，fcitx5 键名：Alt_R（右 Option）、Control_R、F8…；留空不用
     public var voiceKey = "Alt_R"
+    /// 点按说话时没声音多久自动结束，毫秒，0–60000；0 不自动结束（再点一下语音键结束，最长录 2 分钟）。#285
+    public var voiceSilenceTimeout = 1500
     /// 语音识别的结果同时复制到剪贴板
     public var voiceCopy = false
     /// 打开表情面板的快捷键，nil 不用快捷键。Linux 默认 Super+period；macOS 上 Command 组合键
@@ -412,7 +414,8 @@ public struct WowtypeConfig: Equatable {
         "ShuangpinAbbrev", "WubiAutoCommit", "WubiHint", "ShiftToggle", "InitialMode", "WindowMode",
         "Traditional",
         "PunctuationStyle", "AutoPairPunct", "DateTime", "Calculator", "EmojiSuggest", "AutoSpace", "AutoSpaceLetters",
-        "AutoSpaceDigits", "Lexicon", "Toolbar", "ClipboardHistory", "Voice", "VoiceKey", "VoiceCopy", "EmojiKey",
+        "AutoSpaceDigits", "Lexicon", "Toolbar", "ClipboardHistory", "Voice", "VoiceKey", "VoiceSilenceTimeout",
+        "VoiceCopy", "EmojiKey",
         "ToggleKey", "TranslateModeKey", "CheckUpdate", "BetaUpdates", "TypingStats", "SettingsTheme", "SettingsAccent",
         "Translate", "TranslateTarget", "TranslateBaseUrl", "TranslateModel", "TranslateFormal", "TranslateLocal",
         "TranslateLocalModel", "TranslateLlamaServer", "TranslateIdleMinutes",
@@ -468,6 +471,8 @@ public struct WowtypeConfig: Equatable {
         case "CandidateFontSize":
             if let n = Int(value) { candidateFontSize = min(max(n, 10), 40) }
         case "VoiceKey": voiceKey = value
+        case "VoiceSilenceTimeout":
+            if let n = Int(value) { voiceSilenceTimeout = min(max(n, 0), 60000) }
         case "EmojiKey":
             // 留空是不用快捷键；写错了保持默认
             if value.isEmpty {
@@ -519,6 +524,7 @@ public struct WowtypeConfig: Equatable {
         case "Lexicon": return lexicon
         case "CandidateFontSize": return String(candidateFontSize)
         case "VoiceKey": return voiceKey
+        case "VoiceSilenceTimeout": return String(voiceSilenceTimeout)
         case "EmojiKey": return emojiKey?.name ?? ""
         case "ToggleKey": return toggleKey?.name ?? ""
         case "TranslateModeKey": return translateModeKey?.name ?? ""
@@ -763,6 +769,9 @@ public struct WowtypeConfig: Equatable {
         Voice=\(b(d.voice))
         # 语音键：Alt_R 右 Option、Control_R 右 Control、F8、F9、F10；留空不用
         VoiceKey=\(d.voiceKey)
+        # 点按说话时没声音多久自动结束，毫秒：1500（1.5 秒）、3000、5000、10000、30000；
+        # 0 不自动结束，再点一下语音键结束（一次最长录 2 分钟）。长按说话松开就结束，不看这一项
+        VoiceSilenceTimeout=\(d.voiceSilenceTimeout)
         # 说的话上屏的同时复制到剪贴板
         VoiceCopy=\(b(d.voiceCopy))
         # 打开表情面板的快捷键，键名同 fcitx5：Control+period、Control+semicolon、Control+Shift+E；留空不用。

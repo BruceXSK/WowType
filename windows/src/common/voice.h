@@ -1,7 +1,8 @@
 #pragma once
 
 // 语音输入（和 Linux 插件的 handleVoiceKey / pollVoice、macOS 的 VoiceInput.swift 一样）：
-// 按下语音键开始听，按住超过 300ms 松开即结束；更短算点按，继续听到静音 1.5 秒或再按一次（判断在核心里）。
+// 按下语音键开始听，按住超过 300ms 松开即结束；更短算点按，继续听到静音（VoiceSilenceTimeout，默认 1.5 秒，
+// 0 不自动结束）或再按一次（判断在核心里）。
 // 正在听时编辑区里是识别到一半的字，候选框里是麦克风和跟着音量动的波形；出结果就上屏。
 // 说话途中按 Esc 取消；按别的键也不要这次的语音，键照常处理。正在打拼音时不抢语音键。
 //
@@ -66,7 +67,9 @@ public:
     std::function<uint64_t()> clock;
 
     /// 照设置配语音键；第一次要用时才建核心的语音对象（不碰麦克风、不读模型，按键时才读）。
-    void configure(bool enabled, const std::string &keyName, bool copyResult, const std::string &modelDir);
+    /// silenceMs 是点按说话时没声音多久自动结束（VoiceSilenceTimeout，毫秒），0 不自动结束。
+    void configure(bool enabled, const std::string &keyName, bool copyResult, const std::string &modelDir,
+                   int silenceMs = 1500);
     const std::optional<VoiceKey> &key() const { return key_; }
     bool active() const { return showing_; }
 

@@ -274,6 +274,11 @@ FCITX_CONFIGURATION(
         this, "VoiceKey", "语音输入键（按住说话，或点一下开始）", fcitx::Key(FcitxKey_Alt_R),
         fcitx::KeyConstrain({fcitx::KeyConstrainFlag::AllowModifierOnly,
                              fcitx::KeyConstrainFlag::AllowModifierLess})};
+    // 点按说话时没声音多久自动结束（毫秒，#285），0 不自动结束（再点一下语音键结束，最长录 2 分钟）。
+    // WowType 设置里是「停顿多久自动结束」的下拉框（1.5、3、5、10、30 秒、不自动结束）
+    fcitx::Option<int, fcitx::IntConstrain> voiceSilenceTimeout{
+        this, "VoiceSilenceTimeout", "停顿多久自动结束（点按说话，毫秒；0 不自动结束）", 1500,
+        fcitx::IntConstrain(0, 60000)};
     fcitx::Option<bool> voiceCopy{this, "VoiceCopy", "语音识别的结果同时复制到剪贴板", false};
     fcitx::Option<bool> emojiSuggest{this, "EmojiSuggest", "打字时推荐 emoji", true};
     fcitx::Option<fcitx::Key, fcitx::KeyConstrain> emojiKey{
@@ -375,6 +380,7 @@ inline void loadWowtypeConfig(WowtypeConfig &config, const fcitx::RawConfig &fil
     // 范围和上面 IntConstrain 的一样；不一样时契约测试（PageSize=12 读成 9）会报错
     clampWowtypeInt(config.pageSize, raw, 3, 9);
     clampWowtypeInt(config.translateIdleMinutes, raw, 0, 240);
+    clampWowtypeInt(config.voiceSilenceTimeout, raw, 0, 60000);
     if (!raw.valueByPath("TranslateLocal") &&
         (*config.translateBaseUrl).find_first_not_of(" \t\r\n") != std::string::npos) {
         config.translateLocal.setValue(false);

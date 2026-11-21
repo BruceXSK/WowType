@@ -125,6 +125,19 @@ def run(app):
         win.font_row.set_value(14)
     step("数字框", spin)
 
+    def voice_silence():
+        # 语音页的「停顿多久自动结束」：默认 1.5 秒，选「不自动结束」存成 0，再选回来
+        row = win.silence_row
+        check(row.get_title() == "停顿多久自动结束", "停顿的名字不对")
+        check(win.voice_silence_values[row.get_selected()] == "1500", "停顿默认不是 1.5 秒")
+        row.set_selected(win.voice_silence_values.index("0"))
+        check(win.values["VoiceSilenceTimeout"] == "0", "不自动结束没存成 0")
+        row.set_selected(win.voice_silence_values.index("10000"))
+        check(win.values["VoiceSilenceTimeout"] == "10000", "10 秒没存成 10000")
+        row.set_selected(0)
+        check(win.values["VoiceSilenceTimeout"] == "1500", "没改回 1.5 秒")
+    step("停顿多久自动结束", voice_silence)
+
     def arrow_keys():
         # 「方向键」的副标题跟着用法和候选排列走
         win.layout_row.set_selected(1)

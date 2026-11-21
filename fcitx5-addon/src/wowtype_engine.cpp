@@ -1189,6 +1189,10 @@ void WowtypeEngine::applyConfig() {
         const char *dir = std::getenv("WOWTYPE_VOICE_MODEL_DIR");
         voice_ = wowtype_voice_new(dir);
     }
+    if (voice_) {
+        // 点按说话的静音超时（#285）：0 不自动结束，再点一下语音键结束
+        wowtype_voice_set_silence_timeout(voice_, static_cast<unsigned>(*config_.voiceSilenceTimeout));
+    }
     // 互译：环境变量 WOWTYPE_TRANSLATE_URL / _MODEL / _TARGET / _KEY_FILE 覆盖（测试用）
     translateEnabled_ = envOr("WOWTYPE_TRANSLATE", *config_.translate);
     std::string translateUrl = *config_.translateBaseUrl;

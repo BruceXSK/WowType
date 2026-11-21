@@ -96,7 +96,8 @@ uint64_t VoiceInput::now() const { return clock ? clock() : monotonicMs(); }
 
 bool VoiceInput::ready() const { return modelReady ? modelReady(modelDir_) : defaultModelReady(modelDir_); }
 
-void VoiceInput::configure(bool enabled, const std::string &keyName, bool copyResult, const std::string &modelDir) {
+void VoiceInput::configure(bool enabled, const std::string &keyName, bool copyResult, const std::string &modelDir,
+                           int silenceMs) {
     const std::optional<VoiceKey> wanted = enabled ? VoiceKey::parse(keyName) : std::nullopt;
     if (wanted != key_) {
         if (showing_) {
@@ -110,6 +111,10 @@ void VoiceInput::configure(bool enabled, const std::string &keyName, bool copyRe
     if (key_ && !handle_) {
         // 核心不带语音编的时候是 NULL，这时语音键什么也不做
         handle_ = wowtype_voice_new(modelDir.c_str());
+    }
+    if (handle_) {
+        // 点按说话的静音超时（#285）：0 不自动结束，再点一下语音键结束
+        wowtype_voice_set_silence_timeout(handle_, static_cast<unsigned>(silenceMs < 0 ? 0 : silenceMs));
     }
 }
 

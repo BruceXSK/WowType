@@ -186,6 +186,16 @@ func checkConfigContract() {
     check(VoiceKey.presets.map(\.name) == voicePresets, "契约：语音键的选项（macOS）",
           "规格 \(voicePresets)，macOS \(VoiceKey.presets.map(\.name))")
     check(VoiceKey.presets.allSatisfy { VoiceKey(name: $0.name) != nil }, "契约：语音键的选项都认得")
+    // 「停顿多久自动结束」：选项、名字、说明和规格一样（Linux 的 VOICE_SILENCE_*、Windows 的 voiceSilenceChoices 对照同一份）
+    let silence = byKey["VoiceSilenceTimeout"]
+    let silenceChoices = (silence?["choices"]?.array ?? []).map { "\($0["name"]?.string ?? "?")=\($0["value"]?.int ?? -1)" }
+    let ourSilence = VoiceSilence.choices.map { "\($0.label)=\($0.value)" }
+    check(ourSilence == silenceChoices, "契约：VoiceSilenceTimeout 的选项（macOS）", "规格 \(silenceChoices)，macOS \(ourSilence)")
+    check(VoiceSilence.title == silence?["title"]?.string && VoiceSilence.info == silence?["info"]?.string,
+          "契约：VoiceSilenceTimeout 的名字和说明（macOS）", "\(VoiceSilence.title) / \(VoiceSilence.info)")
+    check(VoiceSilence.options(current: 1500).count == silenceChoices.count
+              && VoiceSilence.options(current: 2000).last?.1 == 2000,
+          "契约：VoiceSilenceTimeout 文件里是别的数时多一项「其他」")
     // 切换键、互译键：设置窗口能选的和规格里 presets.macos 一样，每个都认得、写回去键名不变
     for (key, ours) in [("ToggleKey", Shortcut.toggleKeyPresets), ("TranslateModeKey", Shortcut.translateModeKeyPresets)] {
         let presets = byKey[key]?["presets"]?["macos"]?.array?.compactMap { $0.string } ?? []

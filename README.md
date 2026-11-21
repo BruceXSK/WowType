@@ -416,7 +416,7 @@ vim.api.nvim_create_autocmd("InsertEnter", { callback = function() vim.fn.system
 在 WowType 打字的地方（没在打拼音时）：
 
 - **按住右 `Alt` 说话，松开**：说的话上屏。
-- **点一下右 `Alt`**：开始听，说完停 1.5 秒自动上屏，或者再点一下右 `Alt` 马上结束。
+- **点一下右 `Alt`**：开始听，说完停 1.5 秒自动上屏，或者再点一下右 `Alt` 马上结束。说话爱停下来想的，在设置「语音」页的「停顿多久自动结束」里改成 3、5、10、30 秒，或者「不自动结束」（只有再点一下才结束；一次最长录 2 分钟）。
 - 说话时编辑区里是正在识别的字；按 `Esc` 不要这次说的话；按别的键也会放弃这次说的话，那个键照常打字。
 - **GNOME** 上光标下面会弹出一条语音浮条：绿色话筒（外圈跟着音量呼吸）、「正在听… 离线」和一排跟着你音量跳动的竖条，
   光标右边也会裂成几根跳动的绿色竖条；松开后显示「识别完成」再淡出。浮条是 WowType 的 GNOME 扩展画的
@@ -432,7 +432,7 @@ vim.api.nvim_create_autocmd("InsertEnter", { callback = function() vim.fn.system
 不方便开设置界面（比如远程、NixOS 配置脚本）时用命令行：`wowtype-config --install-voice-model` 下载并打开语音输入
 （也接受已经下载好的语音包路径），`wowtype-config --remove-voice-model` 删掉并关闭。
 
-换语音键（右 Ctrl、菜单键、F8–F10）或者关掉语音，在 [WowType 设置](#设置)的「语音」页里改。
+换语音键（右 Ctrl、菜单键、F8–F10）、点按说话停顿多久自动结束，或者关掉语音，在 [WowType 设置](#设置)的「语音」页里改。
 
 **macOS** 上一样用，语音键是右 `Option`（也能换成右 Control、F8–F10）：在设置窗口的「语音」页下载模型
 （和 Linux 同一个包，存在 `~/Library/Application Support/WowType/wtlocal/`），第一次说话时允许 WowType 使用麦克风。
