@@ -373,6 +373,47 @@ void CandidateWindow::paint() {
     }
 }
 
+const CandidateWindow::Item *CandidateWindow::itemAt(LPARAM lParam) const {
+    const UINT dpi = GetDpiForWindow(hwnd_) ? GetDpiForWindow(hwnd_) : 96;
+    const float x = GET_X_LPARAM(lParam) * 96.0f / dpi;
+    const float y = GET_Y_LPARAM(lParam) * 96.0f / dpi;
+    for (const auto &item : items_) {
+        if (contains(item.rect, x, y)) {
+            return &item;
+        }
+    }
+    return nullptr;
+}
+
+void CandidateWindow::showForgetMenu(LPARAM lParam) {
+    const Item *item = itemAt(lParam);
+    if (!item || !canForget || !onForget) {
+        return;
+    }
+    const int index = item->index;
+    if (!canForget(index)) {
+        return;
+    }
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+    // 字样和 Linux、macOS 一样；Tab 后面是右对齐的快捷键提示
+    const std::wstring title = widen(Composer::forgetMenuTitle) + L"\tCtrl+Delete";
+    constexpr UINT kForget = 1;
+    AppendMenuW(menu, MF_STRING, kForget, title.c_str());
+    POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    ClientToScreen(hwnd_, &pt);
+    // 候选框在应用的线程里，应用本来就在前台：不 SetForegroundWindow，免得抢走输入框的焦点、结束组字
+    const UINT chosen = static_cast<UINT>(TrackPopupMenuEx(
+        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, hwnd_,
+        nullptr));
+    DestroyMenu(menu);
+    if (chosen == kForget && onForget) {
+        onForget(index);
+    }
+}
+
 LRESULT CALLBACK CandidateWindow::windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     auto *self = reinterpret_cast<CandidateWindow *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (self) {
@@ -421,6 +462,9 @@ LRESULT CandidateWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     }
+    case WM_RBUTTONUP:
+        showForgetMenu(lParam);
+        return 0;
     case WM_MOUSEWHEEL:
         if (onPage) {
             onPage(GET_WHEEL_DELTA_WPARAM(wParam) < 0);

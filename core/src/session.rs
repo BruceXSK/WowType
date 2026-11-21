@@ -2580,16 +2580,52 @@ impl<'e> Session<'e> {
     /// emoji、日期时间这类没学过）；什么也没学过、是自定义词时什么也不做。
     /// 五笔码的候选是码表里的，五笔也不学，没有可忘的（同一个词拼音学过的不能顺手删掉）。
     fn forget_current(&mut self) {
+        if let Some(index) = self.current_index() {
+            self.forget_at(index);
+        }
+    }
+
+    /// 全部候选里第 index 个（不分页，和 [`Session::choose`] 一样）能不能忘掉：是学过的词
+    /// （用户词库里有、有选词热度或搭配，见 [`Engine::can_forget`]）。词库里本来就有、没学过的，
+    /// 自定义词，emoji、计算结果、日期时间，五笔码的候选，开着工具栏、表情面板、联想时，越界时都是 false。
+    /// 外壳的右键菜单据此决定给不给「忘掉这个词」；不改编辑区和候选框。
+    pub fn can_forget(&mut self, index: usize) -> bool {
+        let Some(engine) = self.engine else {
+            return false;
+        };
+        if !self.composing() || self.tool.is_some() || self.association.is_some() || self.wubi_code() {
+            return false;
+        }
+        self.candidates()
+            .get(index)
+            .is_some_and(|c| c.kind == CandidateKind::Word && engine.can_forget(&c.text))
+    }
+
+    /// 鼠标右键「忘掉这个词」：忘掉全部候选里第 index 个（不分页），和光标在它上面按 Ctrl+Delete 一样，
+    /// 候选原地重算，编辑区、页码和光标不动，真忘掉了 frame 带 `forgot`。没东西可忘时什么也不做；
+    /// 没在打字、开着工具栏 / 表情面板 / 联想、序号不对时 handled = false。
+    pub fn forget(&mut self, index: usize) -> Frame {
+        let ok = self.composing()
+            && self.tool.is_none()
+            && self.association.is_none()
+            && index < self.candidates().len();
+        if ok {
+            self.forget_at(index);
+        }
+        self.frame(ok)
+    }
+
+    /// 忘掉全部候选里第 index 个，见 [`Session::forget_current`]。
+    fn forget_at(&mut self, index: usize) {
         let Some(engine) = self.engine else {
             return;
         };
         if self.wubi_code() {
             return;
         }
-        let Some(index) = self.current_index() else {
+        let Some(chosen) = self.candidates().get(index) else {
             return;
         };
-        let chosen = &self.candidates[index];
         if chosen.kind != CandidateKind::Word || !engine.forget_word(&chosen.text) {
             return;
         }

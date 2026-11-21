@@ -53,6 +53,22 @@
   color: rgba(127, 127, 127, 0.9);
 }
 
+/* 展开面板网格上右键的小菜单「忘掉这个词」（#229），外观照 popup-menu */
+.wowtype-grid-menu {
+  border-radius: 12px;
+  padding: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.wowtype-grid-menu-item {
+  spacing: 1.5em;
+}
+
+.wowtype-grid-menu-hint {
+  font-size: 0.85em;
+  color: rgba(127, 127, 127, 0.9);
+}
+
 /* 语音输入浮条（voice.js），配色和尺寸照宣传片 */
 .wowtype-voice-pill {
   background-color: #ffffff;

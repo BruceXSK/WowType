@@ -462,6 +462,11 @@ public:
     /// 句首词候选先压进已选栈，剩下的拼音继续输入。
     void commitCandidate(fcitx::InputContext *ic, WowtypeState *state,
                          std::size_t index);
+    /// 候选上点右键（#229）：第 index 个候选（全局下标）是学过的词，菜单里给「忘掉这个词」。
+    bool canForgetCandidate(WowtypeState *state, std::size_t index) const;
+    /// 右键菜单的「忘掉这个词」：忘掉第 index 个候选（全局下标），和光标在它上面按 Ctrl+Delete 一样，
+    /// 忘掉了马上存，照会话重画（编辑区、页码、光标不动）。
+    void forgetCandidate(fcitx::InputContext *ic, WowtypeState *state, std::size_t index);
     /// 点了工具栏 / 表情面板的第 index 项（会话做：菜单进下一层，别的上屏）。
     void choosePanelItem(fcitx::InputContext *ic, WowtypeState *state, std::size_t index);
     /// 展开的候选面板里点了第 row 行：光标在这行就选光标处的词，否则选这行第一个。
@@ -615,6 +620,8 @@ private:
     void checkGridAck();
     /// 扩展上点了一个格子（serial 是那一屏的编号，index 是全局下标）。
     void selectGridCell(uint32_t serial, uint32_t index);
+    /// 扩展上右键点了一格、选了「忘掉这个词」（#229）。
+    void forgetGridCell(uint32_t serial, uint32_t index);
     /// 输入框换了面板（收起、上屏、失去焦点）：网格跟着收起。
     void onGridUiEvent(fcitx::Event &event);
     /// 在会话总线上登记 org.wowtype.Input（外部命令切模式）。
@@ -790,6 +797,7 @@ private:
     std::unique_ptr<fcitx::dbus::ServiceWatcherEntry> gridWatch_;
     std::unique_ptr<fcitx::dbus::Slot> gridAckSlot_;
     std::unique_ptr<fcitx::dbus::Slot> gridSelectSlot_;
+    std::unique_ptr<fcitx::dbus::Slot> gridForgetSlot_;
     std::string gridOwner_;
     uint32_t gridSerial_ = 0;
     uint32_t gridAckedSerial_ = 0;

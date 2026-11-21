@@ -801,6 +801,74 @@ int main(int argc, char **argv) {
         check(!c->isComposing() && client->marked.empty() && !client->page, "上屏后清空编辑区和候选框");
     }
     {
+        // 右键「忘掉这个词」（#229，和 macOS、fcitx5 一样）：学过的词才有，按显示的序号忘，光标不挪；
+        // Ctrl+Delete 忘光标处的
+        check(std::string(Composer::forgetMenuTitle) == "忘掉这个词", "右键菜单的字样");
+        auto [c, client] = fresh();
+        int forgets = 0;
+        c->onForget = [&forgets] { ++forgets; };
+        const auto indexOf = [&client = *client](const std::string &text) {
+            const auto t = client.texts();
+            const auto it = std::find(t.begin(), t.end(), text);
+            return it == t.end() ? -1 : static_cast<int>(it - t.begin());
+        };
+        for (int i = 0; i < 2; ++i) {
+            type(*c, "nihao");
+            if (const int ni = indexOf("尼"); ni >= 0) {
+                c->select(ni);
+                if (const int hao = indexOf("号"); hao >= 0) {
+                    c->select(hao);
+                }
+            }
+        }
+        check(client->committed == "尼号尼号", "选 尼 再选 号 上屏 尼号（两次）", client->committed);
+        client->committed.clear();
+        type(*c, "nihao");
+        const auto learned = client->texts();
+        const int at = indexOf("尼号");
+        const int cursor = client->page ? client->page->cursor : -2;
+        check(at >= 0 && c->canForget(at), "学会的 尼号 能忘", join(learned));
+        check(!c->canForget(static_cast<int>(learned.size())) && !c->canForget(-1), "越界的不能忘");
+        int plain = -1;
+        for (int i = 0; i < static_cast<int>(learned.size()) && plain < 0; ++i) {
+            if (!c->canForget(i)) {
+                plain = i;
+            }
+        }
+        // 小词库里这一页可能都选过（前面的用例上屏过 你好、你）：有没学过的才看它
+        if (plain >= 0) {
+            c->forget(plain);
+            check(forgets == 0 && client->texts() == learned, "没学过的忘了也什么都不做");
+        }
+        const std::string marked = client->marked;
+        c->forget(at);
+        check(forgets == 1 && client->committed.empty() && client->marked == marked && c->input() == "nihao" &&
+                  client->page && client->page->cursor == cursor,
+              "右键忘掉以后马上存，编辑区、光标不动", std::to_string(forgets) + " " + client->marked);
+        const int after = indexOf("尼号");
+        check(after < 0 || after > at, "忘掉以后 尼号 不再排在原来的位置", join(learned) + "-> " + join(client->texts()));
+        check(after < 0 || !c->canForget(after), "忘掉以后不再能忘");
+        c->handle(KeyInput::key(keysym::escape));
+        check(!c->canForget(0), "没在打字时没有右键菜单");
+        // Ctrl+Delete：忘掉光标处的（再学一次，光标挪过去）
+        for (int i = 0; i < 2; ++i) {
+            type(*c, "nihao");
+            if (const int ni = indexOf("尼"); ni >= 0) {
+                c->select(ni);
+                if (const int hao = indexOf("号"); hao >= 0) {
+                    c->select(hao);
+                }
+            }
+        }
+        type(*c, "nihao");
+        for (int i = 0, n = indexOf("尼号"); i < n; ++i) {
+            c->handle(KeyInput::key(keysym::right));
+        }
+        check(c->handle(KeyInput::key(keysym::del, mod::control)) && forgets == 2 && c->input() == "nihao",
+              "Ctrl+Delete 忘掉光标处学过的词", std::to_string(forgets));
+        c->handle(KeyInput::key(keysym::escape));
+    }
+    {
         auto [c, client] = fresh();
         type(*c, "shi");
         const auto texts = client->texts();

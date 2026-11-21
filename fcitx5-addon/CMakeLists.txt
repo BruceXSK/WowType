@@ -44,6 +44,13 @@ add_library(wowtype MODULE
 if(Fcitx5Core_VERSION VERSION_GREATER_EQUAL 5.1.11)
     target_compile_definitions(wowtype PRIVATE WOWTYPE_HAVE_CUSTOM_IM_INFO=1)
 endif()
+# fcitx5 5.1.10 起才有 ActionableCandidateList（候选上点右键的菜单：「忘掉这个词」，#229）；
+# Ubuntu 22.04 的 5.0 上没有右键菜单，Ctrl+Delete 照样能忘
+set(WOWTYPE_HAVE_CANDIDATE_ACTIONS OFF)
+if(Fcitx5Core_VERSION VERSION_GREATER_EQUAL 5.1.10)
+    set(WOWTYPE_HAVE_CANDIDATE_ACTIONS ON)
+    target_compile_definitions(wowtype PRIVATE WOWTYPE_HAVE_CANDIDATE_ACTIONS=1)
+endif()
 
 target_include_directories(wowtype PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../core/include"
@@ -214,6 +221,10 @@ if(WOWTYPE_BUILD_TESTS)
         "（globalconfig.h：${WOWTYPE_FCITX_GLOBALCONFIG_H}）")
     if(_wowtype_password_option)
         target_compile_definitions(wowtype-key-harness PRIVATE WOWTYPE_HAVE_PASSWORD_IM_OPTION=1)
+    endif()
+    # 候选的右键菜单（#229）：插件编进去了才测
+    if(WOWTYPE_HAVE_CANDIDATE_ACTIONS)
+        target_compile_definitions(wowtype-key-harness PRIVATE WOWTYPE_HAVE_CANDIDATE_ACTIONS=1)
     endif()
 
     # 设置契约：导出 WowtypeConfig 的键、默认值、范围、可选值，scripts/test-config-contract.py 对照 spec/config.json

@@ -529,6 +529,49 @@ do {
     check(!c.handle(.key(Keysym.backspace, .control)), "没在打字时 Control+Delete 交给应用")
 }
 
+do {
+    // 候选上点右键「忘掉这个词」（#229）：学过的词才有，按显示的序号忘，光标不挪
+    check(Composer.forgetMenuTitle == "忘掉这个词", "右键菜单的字样")
+    let (c, client) = fresh()
+    var forgets = 0
+    c.onForget = { forgets += 1 }
+    for _ in 0..<2 {
+        type(c, "nihao")
+        if let ni = client.page?.texts.firstIndex(of: "尼") {
+            c.select(ni)
+            if let hao = client.page?.texts.firstIndex(of: "号") {
+                c.select(hao)
+            }
+        }
+    }
+    client.committed = ""
+    type(c, "nihao")
+    let learned = client.page?.texts ?? []
+    let at = learned.firstIndex(of: "尼号")
+    let cursor = client.page?.cursor
+    check(at.map { c.canForget($0) } == true, "学会的 尼号 能忘", "\(learned)")
+    check(!c.canForget(learned.count) && !c.canForget(-1), "越界的不能忘")
+    let plain = learned.indices.first { !c.canForget($0) }
+    check(plain != nil, "没学过的词不给「忘掉这个词」", "\(learned)")
+    if let plain {
+        c.forget(plain)
+        check(forgets == 0 && client.page?.texts == learned, "没学过的忘了也什么都不做")
+    }
+    let marked = client.marked
+    if let at {
+        c.forget(at)
+    }
+    check(forgets == 1 && client.committed.isEmpty && client.marked == marked && c.input == "nihao"
+          && client.page?.cursor == cursor,
+          "右键忘掉以后马上存，编辑区、光标不动", "\(forgets) \(client.committed) \(client.marked)")
+    let after = client.page?.texts ?? []
+    check((after.firstIndex(of: "尼号") ?? Int.max) > (at ?? 0), "忘掉以后 尼号 不再排在原来的位置",
+          "\(learned) -> \(after)")
+    check(after.firstIndex(of: "尼号").map { !c.canForget($0) } ?? true, "忘掉以后不再能忘")
+    _ = c.handle(.key(Keysym.escape))
+    check(!c.canForget(0), "没在打字时没有右键菜单")
+}
+
 // MARK: 设置（wowtype.conf）
 
 /// 照设置配好引擎和会话；测完把引擎改回默认（所有测试共用一个引擎）。

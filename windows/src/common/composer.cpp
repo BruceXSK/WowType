@@ -315,6 +315,33 @@ void Composer::select(int index) {
     }
 }
 
+std::optional<std::size_t> Composer::shownIndex(int index) {
+    if (index < 0 || !isComposing() || openPanel() != Panel::None) {
+        return std::nullopt;
+    }
+    const WowtypeFrame *frame = wowtype_session_frame(session_);
+    if (!frame || static_cast<std::size_t>(index) >= frame->cand_count) {
+        return std::nullopt;
+    }
+    return frame->cand_start + static_cast<std::size_t>(index);
+}
+
+bool Composer::canForget(int index) {
+    const auto at = shownIndex(index);
+    return at && wowtype_session_can_forget(session_, *at) == 1;
+}
+
+void Composer::forget(int index) {
+    const auto at = shownIndex(index);
+    if (!at) {
+        return;
+    }
+    const WowtypeFrame *frame = wowtype_session_forget(session_, *at);
+    if (frame && frame->handled) {
+        applyFrame(frame);
+    }
+}
+
 void Composer::turnPage(bool forward) {
     if (!isComposing() && openPanel() == Panel::None) {
         return;

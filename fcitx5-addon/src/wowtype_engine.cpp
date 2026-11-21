@@ -24,6 +24,9 @@
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/candidatelist.h>
+#ifdef WOWTYPE_HAVE_CANDIDATE_ACTIONS
+#include <fcitx/candidateaction.h>
+#endif
 #include <fcitx/globalconfig.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputcontextmanager.h>
@@ -208,16 +211,22 @@ constexpr uint64_t kOverlayAckUsec = 800 * 1000;
 // 展开面板的网格（#270）：GNOME 下 kimpanel 只会把整行涂绿，看不出光标在哪个词上。
 // WowType 的扩展登记 kGridService，插件把这一屏的格子发给它画真正的 6×6 网格，只有光标处那一格高亮：
 //   插件 -> 扩展  Show(u serial, as 格子, u 第一格的全局下标, u 光标的全局下标, u 列数, u 第几屏, u 共几屏,
-//                      s 提示, i x, i y, i w, i h, b 相对窗口, d 缩放)
+//                      s 提示, i x, i y, i w, i h, b 相对窗口, d 缩放,
+//                      ay 每格能不能「忘掉这个词」，1 能（#229，加在末尾，旧扩展不看）)
 //                 Hide(u serial)
 //   扩展 -> 插件  Ack(u serial)            画好了、显示出来了
 //                 Select(u serial, u 下标)  点了一格（全局下标）
+//                 Forget(u serial, u 下标)  右键点了一格、选了「忘掉这个词」（#229）
 // 光标矩形和语音浮条、kimpanel 的一样。扩展回执期间 kimpanel 拿到的是一个空列表（提示、编辑区也挪进网格），
 // 它的候选框整个不画；扩展没登记这个名字（没装、停用了、只会画语音浮条的旧版）就照旧把网格拼成几行给 kimpanel，
 // 发了 kGridAckUsec 还没有回执也退回去。
 constexpr const char *kGridService = "io.github.gloridust.WowType.CandidateGrid";
 constexpr const char *kGridInterface = "io.github.gloridust.WowType.Grid1";
 constexpr uint64_t kGridAckUsec = 500 * 1000;
+
+// 候选右键菜单里忘掉学过的词（#229）。字样三个平台一字不差（macOS、Windows 的候选框，GNOME 扩展的网格）。
+constexpr const char *kForgetActionText = "忘掉这个词";
+constexpr int kForgetActionId = 1;
 
 /// 用户输入习惯（词的热度、词搭配）和用户词库放在同一个目录：history.tsv。
 std::string historyPathFor(const std::string &userDict) {
@@ -487,6 +496,9 @@ public:
         engine_->commitCandidate(inputContext, state_, index_);
     }
 
+    /// 在外壳抄的候选（WowtypeState::candidates_）里的下标。
+    std::size_t index() const { return index_; }
+
 private:
     WowtypeEngine *engine_;
     WowtypeState *state_;
@@ -691,11 +703,70 @@ public:
 
 namespace {
 
+#ifdef WOWTYPE_HAVE_CANDIDATE_ACTIONS
+/// 候选上点右键出的菜单（fcitx5 5.1.10 起的 ActionableCandidateList，经典界面画；kimpanel 不画）：
+/// 学过的词给一项「忘掉这个词」（#229），和光标移到它上面按 Ctrl+Delete 一样。
+class WowtypeForgetActions final : public fcitx::ActionableCandidateList {
+public:
+    WowtypeForgetActions(WowtypeEngine *engine, fcitx::InputContext *ic, WowtypeState *state,
+                         const fcitx::CandidateList *owner)
+        : engine_(engine), ic_(ic->watch()), state_(state), owner_(owner) {}
+
+    bool hasAction(const fcitx::CandidateWord &candidate) const override {
+        const auto *word = dynamic_cast<const WowtypeCandidateWord *>(&candidate);
+        return word && ic_.get() && engine_->canForgetCandidate(state_, word->index());
+    }
+
+    std::vector<fcitx::CandidateAction>
+    candidateActions(const fcitx::CandidateWord &candidate) const override {
+        std::vector<fcitx::CandidateAction> actions;
+        if (hasAction(candidate)) {
+            fcitx::CandidateAction forget;
+            forget.setId(kForgetActionId);
+            forget.setText(kForgetActionText);
+            actions.push_back(std::move(forget));
+        }
+        return actions;
+    }
+
+    void triggerAction(const fcitx::CandidateWord &candidate, int id) override {
+        const auto *word = dynamic_cast<const WowtypeCandidateWord *>(&candidate);
+        auto *ic = ic_.get();
+        if (id != kForgetActionId || !word || !ic) {
+            return;
+        }
+        // 只认输入框现在显示的这个列表（菜单开着时候选框换了的不算）。忘掉以后重画会换掉它，
+        // 连同这个对象和 candidate 一起释放：忘完之前先留着
+        const auto keep = ic->inputPanel().candidateList();
+        if (keep.get() != owner_) {
+            return;
+        }
+        const std::size_t index = word->index();
+        engine_->forgetCandidate(ic, state_, index);
+    }
+
+private:
+    WowtypeEngine *engine_;
+    fcitx::TrackableObjectReference<fcitx::InputContext> ic_;
+    WowtypeState *state_;
+    const fcitx::CandidateList *owner_;
+};
+#endif
+
 /// 普通候选的列表：翻页、移动光标交给会话，再照会话的页码和光标摆好自己。
 /// 键盘上的翻页键由会话直接处理；这里接的是鼠标点翻页按钮、滚轮，和直接调候选列表的。
+/// 右键点候选：学过的词给「忘掉这个词」（fcitx5 5.1.10 起）。
 class WowtypeSessionList final : public fcitx::CommonCandidateList {
 public:
-    explicit WowtypeSessionList(WowtypeState *state) : state_(state) {}
+    WowtypeSessionList(WowtypeEngine *engine, fcitx::InputContext *ic, WowtypeState *state)
+        : state_(state) {
+#ifdef WOWTYPE_HAVE_CANDIDATE_ACTIONS
+        setActionableImpl(std::make_unique<WowtypeForgetActions>(engine, ic, state, this));
+#else
+        (void)engine;
+        (void)ic;
+#endif
+    }
 
     void prev() override { act(WOWTYPE_KEY_ACTION_PREV_PAGE); }
     void next() override { act(WOWTYPE_KEY_ACTION_NEXT_PAGE); }
@@ -963,6 +1034,7 @@ void WowtypeEngine::setupOverlays() {
         WLOG_I() << "WowType: 连不上会话总线，语音用文字提示：" << e.what();
         gridEventWatchers_.clear();
         gridSelectSlot_.reset();
+        gridForgetSlot_.reset();
         gridAckSlot_.reset();
         gridWatch_.reset();
         gridOwner_.clear();
@@ -1073,6 +1145,17 @@ void WowtypeEngine::setupGridOverlay() {
             }
             return true;
         });
+    gridForgetSlot_ = overlayBus_->addMatch(
+        fcitx::dbus::MatchRule(kGridService, kOverlayPath, kGridInterface, "Forget"),
+        [this](fcitx::dbus::Message &msg) {
+            uint32_t serial = 0;
+            uint32_t index = 0;
+            msg >> serial >> index;
+            if (msg && msg.sender() == gridOwner_) {
+                forgetGridCell(serial, index);
+            }
+            return true;
+        });
     for (const auto type :
          {fcitx::EventType::InputContextUpdateUI, fcitx::EventType::InputContextFocusOut}) {
         gridEventWatchers_.push_back(instance_->watchEvent(
@@ -1090,8 +1173,10 @@ void WowtypeEngine::sendGridOverlay(fcitx::InputContext *ic, WowtypeState *state
     const std::size_t screen = cursor / perScreen;
     const std::size_t first = screen * perScreen;
     std::vector<std::string> cells;
+    std::vector<uint8_t> forgettable; // 不用 vector<bool>：fcitx 的 Message 按引用遍历
     for (std::size_t i = first; i < std::min(n, first + perScreen); ++i) {
         cells.push_back(shownCandidate(all[i]).toString());
+        forgettable.push_back(canForgetCandidate(state, i) ? 1 : 0);
     }
     const OverlayCursor c = overlayCursor(ic);
     ++gridSerial_;
@@ -1100,7 +1185,7 @@ void WowtypeEngine::sendGridOverlay(fcitx::InputContext *ic, WowtypeState *state
     msg << gridSerial_ << cells << static_cast<uint32_t>(first) << static_cast<uint32_t>(cursor)
         << static_cast<uint32_t>(kGridCols) << static_cast<uint32_t>(screen)
         << static_cast<uint32_t>((n + perScreen - 1) / perScreen) << header << c.x << c.y << c.w << c.h
-        << c.relative << c.scale;
+        << c.relative << c.scale << forgettable;
     msg.send();
     gridIc_ = ic->watch();
     if (gridPendingSince_) {
@@ -1157,6 +1242,14 @@ void WowtypeEngine::selectGridCell(uint32_t serial, uint32_t index) {
         return;
     }
     commitCandidate(ic, ic->propertyFor(&factory_), index);
+}
+
+void WowtypeEngine::forgetGridCell(uint32_t serial, uint32_t index) {
+    auto *ic = gridIc_.get();
+    if (!ic || serial != gridSerial_) {
+        return;
+    }
+    forgetCandidate(ic, ic->propertyFor(&factory_), index);
 }
 
 void WowtypeEngine::onGridUiEvent(fcitx::Event &event) {
@@ -2243,7 +2336,7 @@ void WowtypeEngine::updateInputPanel(fcitx::InputContext *ic,
     if (state->expanded_ && !state->candidates_.empty()) {
         fillGridPanel(ic, state);
     } else if (!state->candidates_.empty()) {
-        auto candidates = std::make_unique<WowtypeSessionList>(state);
+        auto candidates = std::make_unique<WowtypeSessionList>(this, ic, state);
         candidates->setLayoutHint(horizontal_
                                       ? fcitx::CandidateLayoutHint::Horizontal
                                       : fcitx::CandidateLayoutHint::Vertical);
@@ -2385,7 +2478,51 @@ bool sameCandidate(WowtypeState *state, std::size_t index, const WowtypeCandidat
            shown.emoji == (info.kind == WOWTYPE_CAND_EMOJI);
 }
 
+/// 外壳抄的第 index 个候选在会话里的序号：外壳的候选是会话候选的一份拷贝，序号一样；会话的候选在显示以后
+/// 变了（上文、设置、引擎变了又没刷新）就找同一个词，找不到是 SIZE_MAX。
+std::size_t sessionIndex(WowtypeState *state, std::size_t index) {
+    if (index >= state->candidates_.size()) {
+        return SIZE_MAX;
+    }
+    const WowtypeCandidate &shown = state->candidates_[index];
+    if (sameCandidate(state, index, shown)) {
+        return index;
+    }
+    const std::size_t total = wowtype_session_candidate_total(state->session_);
+    for (std::size_t i = 0; i < total; ++i) {
+        if (sameCandidate(state, i, shown)) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
 } // namespace
+
+bool WowtypeEngine::canForgetCandidate(WowtypeState *state, std::size_t index) const {
+    if (!state || state->panel() != WOWTYPE_TOOL_NONE || !state->composing()) {
+        return false;
+    }
+    const std::size_t at = sessionIndex(state, index);
+    return at != SIZE_MAX && wowtype_session_can_forget(state->session_, at) == 1;
+}
+
+void WowtypeEngine::forgetCandidate(fcitx::InputContext *ic, WowtypeState *state, std::size_t index) {
+    if (!ic || !state || state->panel() != WOWTYPE_TOOL_NONE || !state->composing()) {
+        return;
+    }
+    const std::size_t at = sessionIndex(state, index);
+    if (at == SIZE_MAX) {
+        refreshCandidates(state);
+        updateInputPanel(ic, state);
+        return;
+    }
+    // 和 Ctrl+Delete 一样由会话忘：忘掉了 frame 带 forgot（applySessionFrame 马上存），候选重算了照会话重画
+    const WowtypeFrame *frame = wowtype_session_forget(state->session_, at);
+    if (frame && frame->handled) {
+        applySessionFrame(ic, state, frame);
+    }
+}
 
 void WowtypeEngine::commitCandidate(fcitx::InputContext *ic,
                                     WowtypeState *state, std::size_t index) {
@@ -2396,23 +2533,12 @@ void WowtypeEngine::commitCandidate(fcitx::InputContext *ic,
         choosePanelItem(ic, state, index);
         return;
     }
-    // 选词、上屏、学习由会话做；外壳的候选是会话候选的一份拷贝，序号一样
-    const WowtypeCandidate chosen = state->candidates_[index];
-    if (!sameCandidate(state, index, chosen)) {
-        // 会话的候选在显示以后变了（上文、设置、引擎变了又没刷新）：选同一个词，找不到就只刷新显示
-        index = SIZE_MAX;
-        const std::size_t total = wowtype_session_candidate_total(state->session_);
-        for (std::size_t i = 0; i < total; ++i) {
-            if (sameCandidate(state, i, chosen)) {
-                index = i;
-                break;
-            }
-        }
-        if (index == SIZE_MAX) {
-            refreshCandidates(state);
-            updateInputPanel(ic, state);
-            return;
-        }
+    // 选词、上屏、学习由会话做；会话的候选变了就选同一个词，找不到就只刷新显示
+    index = sessionIndex(state, index);
+    if (index == SIZE_MAX) {
+        refreshCandidates(state);
+        updateInputPanel(ic, state);
+        return;
     }
     const WowtypeFrame *frame = wowtype_session_choose(state->session_, index);
     if (!frame || !frame->handled) {

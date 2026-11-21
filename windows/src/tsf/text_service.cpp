@@ -266,6 +266,19 @@ STDMETHODIMP TextService::ActivateEx(ITfThreadMgr *threadMgr, TfClientId clientI
             flush(currentContext());
         }
     };
+    // 右键「忘掉这个词」（#229）：学过的词才出菜单，点了和 Ctrl+Delete 一样
+    window_->canForget = [this](int index) {
+        std::lock_guard<std::recursive_mutex> inner(EngineHost::instance().mutex());
+        return composer_ && composer_->canForget(index);
+    };
+    window_->onForget = [this](int index) {
+        std::lock_guard<std::recursive_mutex> inner(EngineHost::instance().mutex());
+        if (composer_) {
+            sync();
+            composer_->forget(index);
+            flush(currentContext());
+        }
+    };
     window_->onTimer = [this](UINT_PTR id) { onTimer(id); };
 
     composer_ = std::make_unique<Composer>(host.engine(), this);

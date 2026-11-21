@@ -225,6 +225,11 @@ impl UserPairs {
         }
     }
 
+    /// 有没有 word 在前的搭配（查一次表；它在后的要扫一遍全部，见 [`UserPairs::remove_word`]）。
+    pub fn has_prev(&self, word: &str) -> bool {
+        self.map.contains_key(word)
+    }
+
     /// 去掉和 word 有关的搭配（它在前或在后的都去掉），返回去掉了几条。
     pub fn remove_word(&mut self, word: &str) -> usize {
         let mut removed = self.map.remove(word).map_or(0, |next| next.len());
@@ -560,6 +565,17 @@ pub fn load_history_with<P: AsRef<Path>>(
 mod tests {
     use super::*;
     use crate::lm::BigramLm;
+
+    /// 只看 word 在前的搭配（右键菜单的「忘掉这个词」看它，#229）。
+    #[test]
+    fn pairs_has_prev() {
+        let mut pairs = UserPairs::default();
+        pairs.learn("我特", "你好", 1);
+        assert!(pairs.has_prev("我特"));
+        assert!(!pairs.has_prev("你好") && !pairs.has_prev("别的"));
+        assert_eq!(pairs.remove_word("你好"), 1);
+        assert!(!pairs.has_prev("我特"));
+    }
 
     /// 忘掉的词（f 行）：读回来、合并时去掉在忘掉之前学到的，留着之后又用过的；过期的、又用过的不写。
     #[test]

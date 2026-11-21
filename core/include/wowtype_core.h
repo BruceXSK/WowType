@@ -16,7 +16,7 @@
  * 删函数或改参数含义时升主版本。外壳启动时用 wowtype_abi_version() 比对主版本。
  * 规则见 docs/ABI.md。 */
 #define WOWTYPE_ABI_VERSION_MAJOR 1
-#define WOWTYPE_ABI_VERSION_MINOR 17
+#define WOWTYPE_ABI_VERSION_MINOR 18
 
 #ifdef __cplusplus
 extern "C" {
@@ -553,6 +553,8 @@ typedef struct {
     int delete_next;        /* 1.12 起：1 时这次的退格没接（handled 为 0），成对删：外壳除了删光标前的字（退格），
                              * 还要删光标后的右标点（Delete），和挪光标的键走同一条路按顺序发 */
     size_t choice_index;    /* 1.12 起：这次上屏的候选在列表里的位置（1 起）；不是选候选为 0 */
+    size_t cand_start;      /* 1.18 起：显示的第一个候选在全部候选里的序号（显示的第 i 个是 cand_start + i，
+                             * 传给 wowtype_session_can_forget / _forget、_choose 用） */
 } WowtypeFrame;
 
 /* 建会话。engine 可以传 NULL（词库没载入好时也能打字，载入好了用 set_engine 补上）；
@@ -650,6 +652,16 @@ const char *wowtype_session_selected_text(WowtypeSession *session); /* 已选的
  * 序号不对时 handled 为 0。fcitx5 的候选框点了整个列表里的第几个时用；工具栏、表情面板开着时选面板的。
  * （1.10 删掉了 wowtype_session_append、_set_context：上文由会话自己记，面板的搜索词也在会话里。） */
 const WowtypeFrame *wowtype_session_choose(WowtypeSession *session, size_t index);
+
+/* 鼠标忘词（1.18 起，#229）：候选上点右键出「忘掉这个词」，和光标在它上面按 Ctrl+Delete 一样。
+ * index 都是全部候选里的序号（和 _choose 一样不分页；显示的第 i 个是 frame->cand_start + i）。
+ * can_forget：第 index 个是学过的词（用户词库里有、有选词热度或学到的搭配）返回 1；词库里本来就有、没学过的，
+ * 设置里加的自定义词，emoji、计算结果、日期时间，五笔码的候选，开着工具栏 / 表情面板 / 联想，越界、NULL 返回 0。
+ * 不改会话，之前拿到的 frame 和候选的字照样有效；外壳据此决定菜单里给不给这一项。
+ * forget：忘掉第 index 个，候选原地重算，编辑区、页码和光标不动；真忘掉了 frame->forgot 为 1（外壳马上存
+ * 用户词库和输入习惯），没东西可忘时什么也不做。没在打字、开着面板 / 联想、序号不对时 handled 为 0。 */
+int wowtype_session_can_forget(WowtypeSession *session, size_t index);
+const WowtypeFrame *wowtype_session_forget(WowtypeSession *session, size_t index);
 
 /* 整个候选列表（不分页）：fcitx5 的候选框（CommonCandidateList）要整个列表，外壳抄过去画。
  * 工具栏、表情面板开着时是面板的条目。 */

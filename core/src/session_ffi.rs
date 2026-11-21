@@ -471,6 +471,8 @@ pub struct WowtypeFrame {
     pub delete_next: c_int,
     /// 1.12 起：这次上屏的候选在列表里的位置（1 起）；不是选候选为 0。
     pub choice_index: usize,
+    /// 1.18 起：显示的第一个候选在全部候选里的序号（显示的第 i 个是 `cand_start + i`，右键忘词用）。
+    pub cand_start: usize,
 }
 
 impl Default for WowtypeFrame {
@@ -501,6 +503,7 @@ impl Default for WowtypeFrame {
             cursor_delta: 0,
             delete_next: 0,
             choice_index: 0,
+            cand_start: 0,
         }
     }
 }
@@ -585,6 +588,7 @@ impl WowtypeSession {
                 Panel::Association => WOWTYPE_PANEL_ASSOCIATION,
             },
             cand_count: frame.cand_count,
+            cand_start: frame.cand_start,
             cand_cursor: frame
                 .cand_cursor
                 .and_then(|c| c_int::try_from(c).ok())
@@ -1082,6 +1086,37 @@ pub unsafe extern "C" fn wowtype_session_choose(
         return ptr::null();
     };
     handle.run("choose", |session| session.choose(index))
+}
+
+/// 全部候选里第 index 个（不分页）能不能忘掉：学过的词返回 1，别的（没学过、自定义词、emoji、计算结果、
+/// 五笔码、开着工具栏 / 表情面板 / 联想、越界、NULL）返回 0，见 `Session::can_forget`。不改会话，
+/// 之前拿到的 frame 和候选的字照样有效。外壳的右键菜单据此给不给「忘掉这个词」。（1.18 起）
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_session_can_forget(session: *mut WowtypeSession, index: usize) -> c_int {
+    let Some(handle) = (unsafe { session.as_mut() }) else {
+        return 0;
+    };
+    let inner = &mut handle.session;
+    match panic::catch_unwind(panic::AssertUnwindSafe(|| inner.can_forget(index))) {
+        Ok(can) => c_int::from(can),
+        Err(_) => {
+            set_last_error("session can_forget panicked");
+            0
+        }
+    }
+}
+
+/// 忘掉全部候选里第 index 个（不分页；右键菜单的「忘掉这个词」），和光标在它上面按 Ctrl+Delete 一样：
+/// 候选原地重算，页码和光标不动，真忘掉了 frame 的 forgot 为 1（外壳马上存）。见 `Session::forget`。（1.18 起）
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_session_forget(
+    session: *mut WowtypeSession,
+    index: usize,
+) -> *const WowtypeFrame {
+    let Some(handle) = (unsafe { session.as_mut() }) else {
+        return ptr::null();
+    };
+    handle.run("forget", |session| session.forget(index))
 }
 
 /// 候选框的状态写进 out（按 out->size 写）。返回 0 成功，-1 参数为 NULL。

@@ -296,6 +296,32 @@ int main(int argc, char **argv) {
         check(f && f->handled && f->commit && strcmp(f->commit, first) == 0, "session: select commits");
         check(f->learned && f->mode == WOWTYPE_MODE_CHINESE && !f->translating,
               "session: 1.10 frame fields");
+        /* ABI 1.18：右键「忘掉这个词」，按全部候选里的序号忘掉学过的词 */
+        for (const char *k = "nihao"; *k; ++k) {
+            WowtypeKey key = {sizeof(WowtypeKey), (uint32_t)*k, 0, 0, 0};
+            wowtype_session_key(s, &key);
+        }
+        size_t learned = wowtype_session_candidate_total(s);
+        for (size_t i = 0; i < wowtype_session_candidate_total(s); ++i) {
+            if (wowtype_session_candidate_info(s, i, &info) == 0 && strcmp(info.text, first) == 0) {
+                learned = i;
+                break;
+            }
+        }
+        check(learned < wowtype_session_candidate_total(s) && wowtype_session_can_forget(s, learned) == 1,
+              "session: can forget a learned word");
+        f = wowtype_session_frame(s);
+        check(f && f->size == sizeof(WowtypeFrame) && f->cand_start == 0, "session: 1.18 frame cand_start");
+        check(wowtype_session_can_forget(s, wowtype_session_candidate_total(s)) == 0 &&
+                  wowtype_session_can_forget(NULL, 0) == 0,
+              "session: can_forget out of range");
+        check(!wowtype_session_forget(s, wowtype_session_candidate_total(s))->handled,
+              "session: forget out of range");
+        f = wowtype_session_forget(s, learned);
+        check(f && f->handled && f->forgot && f->commit == NULL && strcmp(wowtype_session_input(s), "nihao") == 0,
+              "session: forget by index");
+        check(wowtype_session_can_forget(s, learned) == 0, "session: nothing left to forget");
+        wowtype_session_reset(s, 0);
         /* ABI 1.10：没在打字时标点由会话换成中文标点 */
         WowtypeKey comma = {sizeof(WowtypeKey), ',', 0, 0, 0};
         f = wowtype_session_key(s, &comma);
