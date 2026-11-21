@@ -3615,6 +3615,9 @@ void runGridOverlayCase(Instance &instance, std::function<void()> done) {
             int32_t x = 0, y = 0, w = 0, h = 0;
             bool relative = false;
             double scale = 1.0;
+            // fcitx5 5.0 的 Message >> vector 不先清空，每一屏都接在后面
+            fake->cells.clear();
+            fake->forgettable.clear();
             msg >> fake->serial >> fake->cells >> fake->first >> fake->cursor >> fake->cols >> fake->page >>
                 fake->pages >> fake->header >> x >> y >> w >> h >> relative >> scale >> fake->forgettable;
             fake->addon = msg.sender();
