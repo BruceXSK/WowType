@@ -407,6 +407,13 @@ extension WowTypeInputController: TextClient {
         panel.onPage = { [weak self] forward in
             self?.mouseAction { $0.turnPage(forward: forward) }
         }
+        // 右键「忘掉这个词」（#229）：学过的词才出菜单
+        panel.canForget = { [weak self] index in
+            self?.composer.canForget(index) ?? false
+        }
+        panel.onForget = { [weak self] index in
+            self?.mouseAction { $0.forget(index) }
+        }
         panel.show(page, below: line)
     }
 

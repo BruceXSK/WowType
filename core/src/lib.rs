@@ -1045,6 +1045,22 @@ impl Engine {
         forgot
     }
 
+    /// [`Engine::forget_word`] 会不会忘掉什么：word 学过（在用户词库里、有选词热度、是攒着的新词、
+    /// 有它在前的搭配），又不是设置里加的自定义词。只看不改，候选框的右键菜单据此决定给不给「忘掉这个词」，
+    /// 展开面板一屏 36 个都要问，所以每样只查一次表：它在后的搭配要扫一遍全部搭配，不看（选过它才有这种搭配，
+    /// 那时也记了选词热度）。
+    pub fn can_forget(&self, word: &str) -> bool {
+        let word = self.lexicon_form(word);
+        let word = word.as_str();
+        if word.is_empty() || self.lexicon.is_custom(word) {
+            return false;
+        }
+        self.lexicon.contains(word)
+            || self.history.read().is_ok_and(|h| h.contains_key(word))
+            || self.new_words.read().is_ok_and(|n| n.contains_key(word))
+            || self.pairs.read().is_ok_and(|p| p.has_prev(word))
+    }
+
     pub fn user_words(&self) -> Vec<(String, String, f64)> {
         self.lexicon.words()
     }
@@ -4279,6 +4295,24 @@ mod tests {
         e.record_selection("妮好");
         assert!(!e.forget_word("妮好"));
         assert_eq!(e.history_count("妮好"), 1);
+    }
+
+    /// can_forget 和 forget_word 说的一致：学过的才是 true，只看不改（右键菜单用，#229）。
+    #[test]
+    fn can_forget_matches_forget_word() {
+        let e = engine("ni hao\t你好\t10\n");
+        assert!(!e.can_forget("你好"), "词库里本来就有、没学过");
+        assert!(!e.can_forget(""));
+        e.add_user_word("wo wo te", "我特", 5000.0).unwrap();
+        assert!(e.can_forget("我特"), "用户词库里的");
+        assert!(e.can_forget("我特"), "问一次不改什么");
+        e.record_selection("你好");
+        assert!(e.can_forget("你好"), "有选词热度");
+        assert!(e.forget_word("我特") && e.forget_word("你好"));
+        assert!(!e.can_forget("我特") && !e.can_forget("你好"));
+        e.lexicon().set_custom_tsv("ni hao\t妮好\n");
+        e.record_selection("妮好");
+        assert!(!e.can_forget("妮好"), "自定义词不忘");
     }
 
     #[test]

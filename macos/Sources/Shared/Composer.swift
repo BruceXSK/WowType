@@ -8,6 +8,7 @@
 // v + 空格的工具栏和表情面板（Toolbar.swift）。
 // 打字途中按 Control+Delete（Mac 键盘上的 Delete 是退格；有向前删除键或按 Fn+Control+Delete 也行）
 // 忘掉光标处学错的词（ABI 1.7），也是会话管，外壳只在 frame->forgot 时马上存学习数据（onForget）。
+// 候选上点右键（或按着 Control 点）出菜单「忘掉这个词」（ABI 1.18，#229），学过的词才有，点了和 Control+Delete 一样。
 //
 // 互译（「译」，和 Linux 的 fcitx5 外壳一样）：上屏的字不交给应用，攒成原文（translateSource）显示在
 // 候选框顶上；原文停下来 0.5 秒（句末标点立刻）发去翻译，译文边出边写在应用的编辑区里（带下划线）。
@@ -644,6 +645,35 @@ public final class Composer {
             return
         }
         apply(frame)
+    }
+
+    /// 候选右键菜单里那一项的字样（#229），和 Linux、Windows 的候选框一字不差。
+    public static let forgetMenuTitle = "忘掉这个词"
+
+    /// 候选框里显示的第 index 个（这一页 / 展开面板这一屏里的位置）能不能「忘掉这个词」：是学过的词
+    /// （会话的 wowtype_session_can_forget）。工具栏、表情面板、联想、五笔码、没学过的、自定义词都不能。
+    public func canForget(_ index: Int) -> Bool {
+        guard let at = shownIndex(index) else { return false }
+        return wowtype_session_can_forget(session, at) == 1
+    }
+
+    /// 右键菜单的「忘掉这个词」：忘掉显示的第 index 个，和光标移到它上面按 Control+Delete 一样
+    /// （忘掉了 onForget 马上存，编辑区、页码、光标不动，候选框重画）。
+    public func forget(_ index: Int) {
+        guard let at = shownIndex(index), let frame = wowtype_session_forget(session, at),
+              frame.pointee.handled != 0 else {
+            return
+        }
+        apply(frame)
+    }
+
+    /// 显示的第 index 个在全部候选里的序号；不在打字、开着面板、越界是 nil。
+    private func shownIndex(_ index: Int) -> Int? {
+        guard index >= 0, isComposing, openPanel == nil, let frame = wowtype_session_frame(session),
+              index < frame.pointee.cand_count else {
+            return nil
+        }
+        return frame.pointee.cand_start + index
     }
 
     /// 候选框上点了翻页箭头、滚了滚轮（和 Linux 的 panelListKey 一样，当成按了 Page Up / Page Down）。

@@ -3,7 +3,8 @@
 // 候选框：自己画的无边框弹出窗口（分层窗口，不抢焦点），Direct2D + DirectWrite 画字（彩色 emoji）。
 // 和 macOS 的 CandidatePanel 对应：横排一行、竖排一列、展开面板 / 表情面板是 6 列的网格，
 // 互译时上面多原文、下面多一行状态；光标处的候选高亮，有上一页 / 下一页时画两个小箭头。
-// 鼠标点候选、点箭头、滚轮交给文本服务（onSelect、onPage）。也拿来挂定时器（互译轮询、模式提示）。
+// 鼠标点候选、点箭头、滚轮交给文本服务（onSelect、onPage）；右键点学过的词出菜单「忘掉这个词」
+// （canForget、onForget，#229）。也拿来挂定时器（互译轮询、模式提示）。
 
 #include <windows.h>
 
@@ -28,6 +29,9 @@ public:
 
     std::function<void(int index)> onSelect;
     std::function<void(bool forward)> onPage;
+    /// 右键点了显示的第 index 个：能不能「忘掉这个词」、点了菜单
+    std::function<bool(int index)> canForget;
+    std::function<void(int index)> onForget;
     std::function<void(UINT_PTR id)> onTimer;
 
     /// 画 page，放在 anchor（屏幕坐标里编辑区或光标的框）下面；放不下就放上面。
@@ -59,6 +63,10 @@ private:
     void layout();
     void paint();
     float measure(const std::wstring &text, IDWriteTextFormat *format, float *height = nullptr) const;
+    /// 客户区坐标（物理像素）下的候选；不在候选上是 nullptr。
+    const Item *itemAt(LPARAM lParam) const;
+    /// 右键点了候选：学过的词弹菜单「忘掉这个词」，选了交给 onForget。
+    void showForgetMenu(LPARAM lParam);
     static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT handle(UINT message, WPARAM wParam, LPARAM lParam);
 

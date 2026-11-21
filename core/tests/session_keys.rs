@@ -1477,6 +1477,99 @@ fn ctrl_delete_keeps_custom_words_and_idle_is_not_ours() {
     assert!(!idle.key(&ctrl(keysym::BACKSPACE)).handled);
 }
 
+/// 右键「忘掉这个词」（#229）：按全部候选里的序号忘，和光标在它上面按 Ctrl+Delete 一样，只是光标不挪。
+#[test]
+fn forget_by_index_keeps_cursor_and_page() {
+    let engine = forget_engine();
+    for _ in 0..3 {
+        let mut session = with(engine);
+        type_keys(&mut session, "shuang");
+        choose_text(&mut session, "霜");
+    }
+    let mut session = with(engine);
+    let before = type_keys(&mut session, "shuang<right>");
+    assert_eq!(texts(&mut session), ["霜", "双"]);
+    assert_eq!(before.cand_cursor, Some(1));
+    assert!(session.can_forget(0), "选过的词能忘");
+    assert!(!session.can_forget(1), "没学过的不给菜单");
+    assert!(!session.can_forget(2), "越界");
+    let frame = session.frame(false);
+    assert_eq!(frame.cand_cursor, Some(1), "can_forget 不动候选框");
+
+    // 没学过的：handled，但什么也不忘
+    let frame = session.forget(1);
+    assert!(frame.handled && !frame.forgot);
+    assert_eq!(texts(&mut session), ["霜", "双"]);
+
+    let frame = session.forget(0);
+    assert!(frame.handled && frame.forgot, "忘掉了要告诉外壳存盘");
+    assert_eq!(frame.commit, None);
+    assert_eq!(frame.preedit, before.preedit, "编辑区不动");
+    assert_eq!(frame.cand_cursor, Some(1), "光标不挪");
+    assert_eq!(session.input(), "shuang");
+    assert_eq!(texts(&mut session), ["双", "霜"], "回到原来的位置");
+    assert_eq!(engine.history_count("霜"), 0);
+    assert!(!session.can_forget(0) && !session.can_forget(1), "没东西可忘了");
+
+    // 越界的不算
+    assert!(!session.forget(2).handled);
+}
+
+/// 一段一段选出来、进了用户词库的词，在第二页上也按序号忘掉，候选框停在第二页。
+#[test]
+fn forget_by_index_removes_user_word_on_later_page() {
+    let engine = forget_engine();
+    for _ in 0..2 {
+        let mut session = with(engine);
+        type_keys(&mut session, "shuangpinge");
+        choose_text(&mut session, "霜");
+        choose_text(&mut session, "频");
+        choose_text(&mut session, "阁");
+    }
+    assert!(engine.user_words().iter().any(|(_, w, _)| w == "霜频阁"));
+    let mut session = with(engine);
+    session.configure(Config { page_size: 1, ..Config::default() });
+    type_keys(&mut session, "shuangpinge");
+    let index = texts(&mut session).iter().position(|t| t == "霜频阁").expect("学过的词");
+    let other = texts(&mut session).iter().position(|t| t == "双拼个");
+    let frame = type_keys(&mut session, "=");
+    assert_eq!(frame.cand_start, 1, "翻到第二页");
+    assert!(session.can_forget(index));
+    if let Some(other) = other {
+        assert!(!session.can_forget(other), "没选过的整句");
+    }
+    let frame = session.forget(index);
+    assert!(frame.handled && frame.forgot);
+    assert_eq!(frame.cand_start, 1, "停在原来那一页");
+    assert!(!engine.user_words().iter().any(|(_, w, _)| w == "霜频阁"));
+    assert!(!texts(&mut session).first().is_some_and(|t| t == "霜频阁"));
+}
+
+/// 自定义词、计算结果、没在打字时不给「忘掉这个词」，按序号忘也什么都不做。
+#[test]
+fn forget_by_index_skips_custom_plain_and_idle() {
+    let engine = forget_engine();
+    engine.lexicon().set_custom_tsv("shuang\t爽\n");
+    let mut session = with(engine);
+    type_keys(&mut session, "shuang");
+    assert_eq!(texts(&mut session)[0], "爽");
+    assert!(!session.can_forget(0));
+    let frame = session.forget(0);
+    assert!(frame.handled && !frame.forgot);
+    assert_eq!(texts(&mut session)[0], "爽");
+
+    let mut idle = with(engine);
+    assert!(!idle.can_forget(0));
+    assert!(!idle.forget(0).handled);
+
+    let mut calc = with(self::engine());
+    type_keys(&mut calc, "v");
+    calc.append("1+2");
+    assert_eq!(calc.candidates()[0].kind, CandidateKind::Plain);
+    assert!(!calc.can_forget(0));
+    assert!(!calc.forget(0).forgot);
+}
+
 #[test]
 fn brackets_pick_first_or_last_char() {
     // 以词定字（#83）：[ 取光标处候选的第一个字，] 取最后一个字
@@ -2818,6 +2911,10 @@ fn wubi_never_learns_or_forgets_pinyin_words() {
     let forget = Key { modifiers: modifier::CTRL, ..Key::press(keysym::DELETE) };
     let frame = session.key(&forget);
     assert!(frame.handled && !frame.forgot);
+    assert!(engine.user_words().iter().any(|(_, w, _)| w == "你好"));
+    // 右键菜单也不给「忘掉这个词」，按序号忘同样什么都不忘
+    assert!(!session.can_forget(0));
+    assert!(!session.forget(0).forgot);
     assert!(engine.user_words().iter().any(|(_, w, _)| w == "你好"));
     // 选词、数字选词、回车、切输入法都不学
     for keys in ["wqvb<sp>", "wqvb2", "wq<cr>"] {

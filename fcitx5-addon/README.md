@@ -27,7 +27,8 @@ Rust 核心负责音节图、束搜索、词典/LM 打分和排序；C++ 只负�
 [安装说明](../docs/INSTALL.md)。
 
 5.1 以后才有的接口按版本判断：5.1.11 起才有自定义的中 / 英提示气泡（`WOWTYPE_HAVE_CUSTOM_IM_INFO`），
-更早的显示 Fcitx 5 默认的输入法提示。插件清单（`wowtype-addon.conf`）里要求的 fcitx5 版本是编译时版本的「主.次.0」（5.1.x 上编的写 5.1.0）。
+更早的显示 Fcitx 5 默认的输入法提示；5.1.10 起候选上点右键有「忘掉这个词」（`WOWTYPE_HAVE_CANDIDATE_ACTIONS`，
+经典界面画菜单，GNOME 的 kimpanel 不画，展开面板交给 WowType 的 GNOME 扩展画时扩展自己出菜单），更早的只能按 Ctrl+Delete。插件清单（`wowtype-addon.conf`）里要求的 fcitx5 版本是编译时版本的「主.次.0」（5.1.x 上编的写 5.1.0）。
 
 在仓库根目录构建并安装：
 

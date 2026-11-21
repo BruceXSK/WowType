@@ -3,7 +3,8 @@
 // Input Method Panel（kimpanel）只会画一行或一列，fcitx5 里的 WowType 插件只好把每行 6 个词拼成一项交给它，
 // 光标所在的那一行整行涂绿，看不出光标在哪个词上。这个扩展在会话总线上登记 BUS_NAME，插件看到后改为把这一屏的
 // 格子发过来（Show 信号），由这里画真正的网格：只有光标处那一格是绿的，鼠标点一格就选它（Select 信号）。
-// 这期间插件给 kimpanel 的是一个空列表，它的候选框不画。
+// 右键点学过的词出一个小菜单「忘掉这个词」（#229，和按 Ctrl+Delete 一样，Forget 信号）；哪些格子能忘由插件
+// 在 Show 末尾告诉（旧插件不发，就不出菜单）。这期间插件给 kimpanel 的是一个空列表，它的候选框不画。
 //
 // 外观照 kimpanel 的候选框：同一套样式类（GNOME 的 popup-menu，深浅色跟着系统；绿色高亮在 stylesheet.css 里），
 // 同样挂在光标下面，字体用 kimpanel 设置里的字体。
@@ -24,6 +25,10 @@ import {stageRect} from './cursor.js';
 const BUS_NAME = 'io.github.gloridust.WowType.CandidateGrid';
 const OBJECT_PATH = '/io/github/gloridust/WowType';
 const INTERFACE = 'io.github.gloridust.WowType.Grid1';
+
+// 右键菜单的字样，和 fcitx5 的候选框、macOS、Windows 一字不差；后面小字是快捷键
+const FORGET_TEXT = '忘掉这个词';
+const FORGET_HINT = 'Ctrl+Delete';
 
 const KIMPANEL_UUID = 'kimpanel@kde.org';
 const KIMPANEL_SCHEMA = 'org.gnome.shell.extensions.kimpanel';
@@ -90,6 +95,8 @@ export class CandidateGrid {
         this._kimpanelSettings = null;
         Main.layoutManager.removeChrome(this._box);
         this._box.destroy();
+        Main.layoutManager.removeChrome(this._menu);
+        this._menu.destroy();
         this._anchor.destroy();
         this._cells = [];
     }
@@ -121,6 +128,35 @@ export class CandidateGrid {
         Main.layoutManager.addChrome(this._box, {});
         Main.uiGroup.add_child(this._anchor);
         this._box.hide();
+
+        // 右键菜单：只有一项。不用 PopupMenu：它要抢键盘（modal），应用会失去焦点、插件收起面板，
+        // 点菜单时这一屏已经没了。这里和网格一样是不抢焦点的 chrome，下一屏（按键、忘掉以后重画）、收起时关掉
+        this._menu = column({
+            style_class: 'popup-menu-content kimpanel-popup-content wowtype-grid-menu',
+            reactive: true,
+            visible: false,
+        });
+        this._menuItem = new St.BoxLayout({
+            style_class: 'popup-menu-item kimpanel-label wowtype-grid-menu-item',
+            reactive: true,
+            track_hover: true,
+        });
+        this._menuItem.add_child(new St.Label({text: FORGET_TEXT, y_align: Clutter.ActorAlign.CENTER}));
+        this._menuItem.add_child(new St.Label({
+            text: FORGET_HINT,
+            style_class: 'wowtype-grid-menu-hint',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.END,
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+        this._menuItem.connect('button-release-event', (_actor, event) => {
+            if (event.get_button() === Clutter.BUTTON_PRIMARY)
+                this._forget(this._menuIndex);
+            return Clutter.EVENT_STOP;
+        });
+        this._menu.add_child(this._menuItem);
+        this._menuIndex = -1;
+        Main.layoutManager.addChrome(this._menu, {});
     }
 
     // 第 i 格（行优先，按需要建）
@@ -136,9 +172,18 @@ export class CandidateGrid {
             cell.add_child(cell._label);
             cell.add_child(cell._text);
             cell._index = -1;
+            cell._forgettable = false;
             cell.connect('button-release-event', (actor, event) => {
-                if (event.get_button() === Clutter.BUTTON_PRIMARY)
+                const button = event.get_button();
+                if (button === Clutter.BUTTON_PRIMARY) {
+                    this._closeMenu();
                     this._select(actor._index);
+                } else if (button === Clutter.BUTTON_SECONDARY) {
+                    if (actor._forgettable && this._menuIndex !== actor._index)
+                        this._openMenu(actor._index, event.get_coords());
+                    else
+                        this._closeMenu();
+                }
                 return Clutter.EVENT_STOP;
             });
             this._cells.push(cell);
@@ -188,6 +233,42 @@ export class CandidateGrid {
         }
     }
 
+    _forget(index) {
+        this._closeMenu();
+        if (!this._shown || !this._sender || index < 0)
+            return;
+        try {
+            Gio.DBus.session.emit_signal(this._sender, OBJECT_PATH, INTERFACE, 'Forget',
+                new GLib.Variant('(uu)', [this._serial, index]));
+        } catch (e) {
+            console.error('WowType 展开面板忘词发不出去：', e);
+        }
+    }
+
+    // 右键菜单挂在鼠标处，放不下时往左、往上挪进屏幕
+    _openMenu(index, [px, py]) {
+        this._menuIndex = index;
+        this._menu.set_style(this._fontStyle || null);
+        this._menu.show();
+        this._menu.get_parent()?.set_child_above_sibling(this._menu, null);
+        const [, , natW, natH] = this._menu.get_preferred_size();
+        let x = px, y = py;
+        const monitor = this._monitorFor({x: px, y: py, w: 1, h: 1});
+        if (monitor) {
+            if (x + natW > monitor.x + monitor.width)
+                x = Math.max(monitor.x, px - natW);
+            if (y + natH > monitor.y + monitor.height)
+                y = Math.max(monitor.y, py - natH);
+        }
+        this._menu.set_position(Math.round(x), Math.round(y));
+    }
+
+    _closeMenu() {
+        this._menuIndex = -1;
+        this._menu.hide();
+        this._menuItem.remove_style_pseudo_class('hover');
+    }
+
     // 插件退出、崩溃时自己收起
     _watchSender(sender) {
         if (sender === this._sender && (this._senderWatch || !sender))
@@ -203,9 +284,11 @@ export class CandidateGrid {
         }
     }
 
-    _update([serial, cells, first, cursor, cols, page, pages, header, x, y, w, h, relative, scale]) {
+    _update([serial, cells, first, cursor, cols, page, pages, header, x, y, w, h, relative, scale, forgettable]) {
         cols = Math.max(1, cols);
         this._serial = serial;
+        // 换了一屏（按了键、忘掉以后重画）：菜单指的那一格可能已经不是原来的词了
+        this._closeMenu();
         this._header.text = header || '';
         this._header.visible = !!header;
         this._page.text = `${page + 1}/${pages}`;
@@ -220,6 +303,8 @@ export class CandidateGrid {
             const cell = this._cell(i, cols);
             const row = Math.floor(i / cols);
             cell._index = first + i;
+            // 插件在 Show 末尾说哪些格子能忘（#229）；旧插件不发，就都不出菜单
+            cell._forgettable = !!(forgettable && forgettable[i]);
             // 光标所在的那一行标 1–6（数字选这一行），别的行留出同样的宽度，上下对齐
             cell._label.text = `${i % cols + 1}`;
             cell._label.opacity = row === cursorRow ? 255 : 0;
@@ -278,6 +363,7 @@ export class CandidateGrid {
         if (!this._shown)
             return;
         this._shown = false;
+        this._closeMenu();
         this._box.close(BoxPointer.PopupAnimation.NONE);
         for (const cell of this._cells)
             cell.remove_style_pseudo_class('hover');

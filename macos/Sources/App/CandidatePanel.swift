@@ -291,6 +291,9 @@ final class CandidateView: NSView {
     var onSelect: ((Int) -> Void)?
     /// 点了翻页箭头、滚了滚轮：true 下一页，false 上一页
     var onPage: ((Bool) -> Void)?
+    /// 右键（按着 Control 点）第几个候选：能不能「忘掉这个词」、点了菜单（#229）
+    var canForget: ((Int) -> Bool)?
+    var onForget: ((Int) -> Void)?
     /// 滚轮（触控板）攒着还没翻页的距离
     private var scrolled: CGFloat = 0
     /// 触控板滚这么多点翻一页
@@ -301,10 +304,46 @@ final class CandidateView: NSView {
     /// 输入法的窗口不会是前台的：第一下点击就要算（和 Linux 的候选框一样，鼠标能点候选、翻页箭头）
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override func mouseDown(with event: NSEvent) {}
+    override func mouseDown(with event: NSEvent) {
+        // 按着 Control 点和点右键一样出菜单（mouseUp 那一下就不选词了）
+        if event.modifierFlags.contains(.control) {
+            showForgetMenu(for: event)
+        }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        showForgetMenu(for: event)
+    }
+
+    /// 候选上点右键：学过的词出菜单「忘掉这个词」，后面是快捷键 ⌃⌫（Control+Delete）；别的候选、空白处什么也不出
+    func forgetMenu(at point: NSPoint) -> (menu: NSMenu, index: Int)? {
+        guard let layout, let index = layout.cells.firstIndex(where: { $0.frame.contains(point) }),
+              canForget?(index) == true else {
+            return nil
+        }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let item = NSMenuItem(title: Composer.forgetMenuTitle, action: #selector(forgetChosen(_:)),
+                              keyEquivalent: "\u{8}")
+        item.keyEquivalentModifierMask = .control
+        item.target = self
+        item.tag = index
+        menu.addItem(item)
+        return (menu, index)
+    }
+
+    private func showForgetMenu(for event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let found = forgetMenu(at: point) else { return }
+        NSMenu.popUpContextMenu(found.menu, with: event, for: self)
+    }
+
+    @objc func forgetChosen(_ sender: NSMenuItem) {
+        onForget?(sender.tag)
+    }
 
     override func mouseUp(with event: NSEvent) {
-        guard let layout else { return }
+        guard let layout, !event.modifierFlags.contains(.control) else { return }
         let point = convert(event.locationInWindow, from: nil)
         if let arrows = layout.arrows {
             if arrows.prev.contains(point) {
@@ -423,6 +462,22 @@ final class CandidatePanel {
     var onPage: ((Bool) -> Void)? {
         get { view.onPage }
         set { view.onPage = newValue }
+    }
+    /// 右键菜单「忘掉这个词」（#229）：第几个能忘、点了
+    var canForget: ((Int) -> Bool)? {
+        get { view.canForget }
+        set { view.canForget = newValue }
+    }
+    var onForget: ((Int) -> Void)? {
+        get { view.onForget }
+        set { view.onForget = newValue }
+    }
+
+    /// 在显示的第 index 个候选上点右键会出的菜单（外壳测试用，不弹出来）；不出菜单是 nil。
+    func forgetMenu(forCandidate index: Int) -> NSMenu? {
+        guard let cells = layout?.cells, cells.indices.contains(index) else { return nil }
+        let cell = cells[index]
+        return view.forgetMenu(at: NSPoint(x: cell.frame.midX, y: cell.frame.midY))?.menu
     }
 
     init() {

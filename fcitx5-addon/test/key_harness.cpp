@@ -351,6 +351,89 @@ void runCases(Instance &instance) {
     fresh(ic.get());
     check(!send(ic.get(), Key(FcitxKey_Delete, KeyState::Ctrl)), "没在打字时 Ctrl+Delete 交给应用");
 
+#ifdef WOWTYPE_HAVE_CANDIDATE_ACTIONS
+    // 候选上点右键的「忘掉这个词」（#229）：经典界面拿 ActionableCandidateList 画菜单。学过的词才有这一项，
+    // 点了和 Ctrl+Delete 一样忘掉、马上存 user.tsv，候选框重画，编辑区和光标不动
+    fresh(ic.get());
+    type(ic.get(), "pa");
+    {
+        const auto before = page(ic.get());
+        const std::string word = before.size() > 2 ? before[2] : "";
+        for (int i = 0; i < 3 && !word.empty(); ++i) {
+            fresh(ic.get());
+            type(ic.get(), "pa");
+            const auto now = page(ic.get());
+            const auto it = std::find(now.begin(), now.end(), word);
+            if (it == now.end()) {
+                break;
+            }
+            type(ic.get(), std::to_string(it - now.begin() + 1));
+        }
+        fresh(ic.get());
+        type(ic.get(), "pa");
+        auto list = ic->inputPanel().candidateList();
+        auto *actions = list ? list->toActionable() : nullptr;
+        check(actions != nullptr, "普通候选框带右键菜单（ActionableCandidateList）");
+        const auto learned = page(ic.get());
+        const auto at = std::find(learned.begin(), learned.end(), word);
+        check(!word.empty() && at != learned.end(), "pa 选了三次的 " + word + " 在第一页：" + join(learned));
+        if (actions && at != learned.end()) {
+            const int idx = static_cast<int>(at - learned.begin());
+            const auto &candidate = list->candidate(idx);
+            const auto menu = actions->candidateActions(candidate);
+            check(actions->hasAction(candidate) && menu.size() == 1 && menu[0].text() == "忘掉这个词",
+                  "学过的 " + word + " 右键有「忘掉这个词」");
+            bool someWithout = false;
+            for (int i = 0; i < list->size(); ++i) {
+                if (!actions->hasAction(list->candidate(i))) {
+                    someWithout = true;
+                    check(actions->candidateActions(list->candidate(i)).empty(),
+                          "没学过的 " + list->candidate(i).text().toString() + " 菜单是空的");
+                    break;
+                }
+            }
+            check(someWithout, "没学过的词不给「忘掉这个词」：" + join(learned));
+            const int cursor = list->cursorIndex();
+            const char *dictPath = std::getenv("WOWTYPE_USER_DICT");
+            std::error_code ec;
+            if (dictPath) {
+                std::filesystem::remove(dictPath, ec);
+            }
+            actions->triggerAction(candidate, menu.empty() ? 1 : menu[0].id());
+            auto redrawn = ic->inputPanel().candidateList();
+            const auto after = page(ic.get());
+            check(redrawn && redrawn != list && preedit(ic.get()) == "pa" && ic->committed.empty() &&
+                      !after.empty() && redrawn->cursorIndex() == cursor,
+                  "点了「忘掉这个词」候选框重画，编辑区和光标不动：" + preedit(ic.get()) + " / " + join(after));
+            const auto again = std::find(after.begin(), after.end(), word);
+            auto *redrawnActions = redrawn ? redrawn->toActionable() : nullptr;
+            const bool stillForgettable =
+                again != after.end() &&
+                (!redrawnActions ||
+                 redrawnActions->hasAction(redrawn->candidate(static_cast<int>(again - after.begin()))));
+            check(!stillForgettable, "忘掉以后 " + word + " 不再有「忘掉这个词」");
+            for (int i = 0; dictPath && i < 300 && !std::filesystem::exists(dictPath, ec); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            std::ifstream in(dictPath ? dictPath : "");
+            const std::string dict((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            check(dictPath && in.is_open() && dict.find("\t" + word + "\t") == std::string::npos,
+                  "右键忘掉以后马上存了 user.tsv，里面没有 " + word + "：" + dict);
+            // 已经换下来的旧列表再点一次：不是输入框现在的列表，什么也不做
+            actions->triggerAction(candidate, menu.empty() ? 1 : menu[0].id());
+            check(ic->inputPanel().candidateList() == redrawn, "过时的列表点了不算");
+        }
+        // 展开面板（一行好几个词）不给右键菜单：说不清忘的是哪个
+        type(ic.get(), "<down>");
+        auto grid = ic->inputPanel().candidateList();
+        check(grid && grid != list && grid->toActionable() == nullptr, "展开面板的行没有右键菜单");
+        type(ic.get(), "<esc>"); // 展开面板里的 Esc 只收起，后面的 fresh 再清空
+    }
+#else
+    std::printf("skip 候选右键菜单：fcitx5 %s 没有 ActionableCandidateList（5.1.10 起）\n",
+                Instance::version().c_str());
+#endif
+
     // 打字途中会话不管的键（小键盘的 + - * / .、F 键、Insert、不是 ASCII 的键……）都吃掉：
     // 交给应用的话，小键盘的 + 先到应用、上屏后成了「+你好」，F5 把网页刷新掉
     fresh(ic.get());
@@ -3497,6 +3580,8 @@ struct FakeGrid {
     bool visible = false;
     uint32_t serial = 0, first = 0, cursor = 0, cols = 0, page = 0, pages = 0;
     std::vector<std::string> cells;
+    /// 每格能不能「忘掉这个词」（#229，Show 末尾的 ay）
+    std::vector<uint8_t> forgettable;
     std::string header;
     std::string addon;
 
@@ -3527,8 +3612,11 @@ void runGridOverlayCase(Instance &instance, std::function<void()> done) {
     FakeGrid *fake = grid.get();
     grid->show = grid->bus->addMatch(
         dbus::MatchRule("", kPath, kInterface, "Show"), [fake](dbus::Message &msg) {
+            int32_t x = 0, y = 0, w = 0, h = 0;
+            bool relative = false;
+            double scale = 1.0;
             msg >> fake->serial >> fake->cells >> fake->first >> fake->cursor >> fake->cols >> fake->page >>
-                fake->pages >> fake->header;
+                fake->pages >> fake->header >> x >> y >> w >> h >> relative >> scale >> fake->forgettable;
             fake->addon = msg.sender();
             ++fake->shows;
             fake->visible = true;
@@ -3631,18 +3719,71 @@ void runGridOverlayCase(Instance &instance, std::function<void()> done) {
              fake->hides = 0;
              s.ic->focusOut();
          }},
-        {11, [fake](VoiceScript &s) {
+        {11, [fake, firstPage](VoiceScript &s) {
              check(fake->hides > 0 && !fake->visible, s.name + "：失去焦点，网格收起");
              s.ic->focusIn();
+             // 右键「忘掉这个词」（#229）：先学一个词（shi 的第 4 个选三次），展开以后它那一格能忘
+             fresh(s.ic.get());
+             type(s.ic.get(), "shi");
+             *firstPage = page(s.ic.get());
+             for (int i = 0; i < 3; ++i) {
+                 fresh(s.ic.get());
+                 type(s.ic.get(), "shi4");
+             }
+             fresh(s.ic.get());
+             type(s.ic.get(), "shi<down>");
+         }},
+        {12, [fake, firstPage](VoiceScript &s) {
+             const std::string word = firstPage->size() > 3 ? (*firstPage)[3] : "";
+             const auto at = std::find(fake->cells.begin(), fake->cells.end(), word);
+             const std::size_t i = at - fake->cells.begin();
+             check(fake->visible && at != fake->cells.end() && fake->forgettable.size() == fake->cells.size() &&
+                       fake->forgettable[i] == 1,
+                   s.name + "：学过的 " + word + " 那一格能「忘掉这个词」：" + join(fake->cells));
+             check(std::count(fake->forgettable.begin(), fake->forgettable.end(), 0) > 0,
+                   s.name + "：没学过的格子不给「忘掉这个词」");
+             // 过时的一屏上右键忘的不算
+             fake->shows = 0;
+             if (at != fake->cells.end()) {
+                 fake->send("Forget", fake->serial - 1, fake->first + static_cast<uint32_t>(i));
+             }
+         }},
+        {13, [fake, firstPage](VoiceScript &s) {
+             const std::string word = firstPage->size() > 3 ? (*firstPage)[3] : "";
+             const auto at = std::find(fake->cells.begin(), fake->cells.end(), word);
+             check(fake->shows == 0 && at != fake->cells.end() && fake->forgettable[at - fake->cells.begin()] == 1,
+                   s.name + "：过时的一屏上忘的不算");
+             if (const char *dictPath = std::getenv("WOWTYPE_USER_DICT")) {
+                 std::error_code ec;
+                 std::filesystem::remove(dictPath, ec);
+             }
+             if (at != fake->cells.end()) {
+                 fake->send("Forget", fake->serial, fake->first + static_cast<uint32_t>(at - fake->cells.begin()));
+             }
+         }},
+        {14, [fake, firstPage](VoiceScript &s) {
+             const std::string word = firstPage->size() > 3 ? (*firstPage)[3] : "";
+             const auto at = std::find(fake->cells.begin(), fake->cells.end(), word);
+             check(fake->shows > 0 && fake->visible && s.ic->committed.empty() && fake->header == "shi",
+                   s.name + "：忘掉以后网格重画、还开着，编辑区不动：" + fake->header);
+             check(at == fake->cells.end() || fake->forgettable[at - fake->cells.begin()] == 0,
+                   s.name + "：忘掉以后 " + word + " 不再能忘");
+             const char *dictPath = std::getenv("WOWTYPE_USER_DICT");
+             std::error_code ec;
+             for (int i = 0; dictPath && i < 300 && !std::filesystem::exists(dictPath, ec); ++i) {
+                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+             }
+             check(!dictPath || std::filesystem::exists(dictPath, ec),
+                   s.name + "：忘掉以后马上存了 user.tsv");
              fresh(s.ic.get());
              // 扩展「坏了」：不再回执
              fake->ack = false;
              type(s.ic.get(), "shi<down>");
          }},
-        {12, [listSize](VoiceScript &s) {
+        {15, [listSize](VoiceScript &s) {
              check(listSize(s) == 0, s.name + "：刚展开时还在等扩展，kimpanel 是空列表");
          }},
-        {19, [fake, listSize, framedRows](VoiceScript &s) {
+        {22, [fake, listSize, framedRows](VoiceScript &s) {
              check(listSize(s) > 0 && framedRows(s) && !fake->visible,
                    s.name + "：等不到回执，退回 kimpanel 拼成几行的网格，叫扩展收起：" + join(page(s.ic.get())));
              type(s.ic.get(), "<right>");
@@ -3651,17 +3792,17 @@ void runGridOverlayCase(Instance &instance, std::function<void()> done) {
              fake->ack = true;
              fake->send("Ack", fake->serial);
          }},
-        {20, [listSize](VoiceScript &s) {
+        {23, [listSize](VoiceScript &s) {
              type(s.ic.get(), "<right>");
              check(listSize(s) == 0, s.name + "：迟到的回执来了，又交给扩展画");
          }},
         // 扩展下线：正显示着的网格马上换回 kimpanel 的
-        {21, [grid](VoiceScript &) {
+        {24, [grid](VoiceScript &) {
              grid->show.reset();
              grid->hide.reset();
              grid->bus.reset();
          }},
-        {23, [framedRows](VoiceScript &s) {
+        {26, [framedRows](VoiceScript &s) {
              check(framedRows(s), s.name + "：扩展下线，正显示着的换回 kimpanel 拼好的网格：" +
                                       join(page(s.ic.get())));
              fresh(s.ic.get());
