@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WowType 一键安装：Ubuntu / Debian、Fedora（x86_64、arm64），Arch Linux、deepin（x86_64），macOS 12 以上；
+# WowType 一键安装：Ubuntu / Debian、Fedora（x86_64、arm64），Arch Linux、deepin、UOS V25（x86_64），macOS 12 以上；
 # openSUSE Tumbleweed 没有预编译包，问过以后在本机从源码编译安装。
 #
 #   curl -fsSL https://raw.githubusercontent.com/Gloridust/WowType/main/install.sh | bash
@@ -144,7 +144,7 @@ usage() {
 默认下载、校验并安装匹配当前发行版的 WowType 包。
 --print-plan  只显示发行版、包管理器和包名，不联网、不安装、不更改配置。
 
-支持 Ubuntu 22.04 / 24.04 / 26.04、Debian 13 及有明确兼容基线的衍生版，deepin 23 / 25，
+支持 Ubuntu 22.04 / 24.04 / 26.04、Debian 13 及有明确兼容基线的衍生版，deepin 23 / 25、UOS V25，
 Arch Linux / EndeavourOS / Garuda / CachyOS，Fedora；预编译包有 x86_64，
 Ubuntu、Debian 的 deb 和 rpm 另有 arm64（aarch64）。macOS 12 以上（Apple 芯片和 Intel）装 pkg。
 openSUSE Tumbleweed 没有预编译包：问过以后用 zypper 装编译依赖，在本机从源码编译安装。
@@ -250,13 +250,17 @@ select_platform() {
   local family=" $ID $ID_LIKE " codename
   # deepin 25 的磐石系统基于 OSTree，但 apt-get install 照常能用（系统转给 deepin-immutable-ctl），
   # 所以要在下面「不可变系统」那条之前认出来。deepin 20 的 ID 是大写的 Deepin。
-  if [[ "$ID" == deepin || "$ID" == Deepin ]]; then
-    case "$VERSION_CODENAME:$VERSION_ID" in
-      crimson:*|*:25|*:25.*) distro=deepin25 ;;
-      beige:*|*:23|*:23.*) distro=deepin23 ;;
-      *) source_install "deepin ${VERSION_ID:-$VERSION_CODENAME} 没有匹配的预编译包（有 deepin 23 和 25 的；deepin 20 / UOS 20 没有 GTK 4，暂不支持）" ;;
+  # 统信 UOS 的 ID 是 uos：V25 和 deepin 25 同源（同样的 fcitx5、deepin-im），用 deepin 25 的包（#236）；
+  # UOS 20 和 deepin 20 一样没有 GTK 4。
+  if [[ "$ID" == deepin || "$ID" == Deepin || "$ID" == uos || "$ID" == UOS ]]; then
+    local name=deepin
+    [[ "$ID" == uos || "$ID" == UOS ]] && name=UOS
+    case "$name:$VERSION_CODENAME:$VERSION_ID" in
+      deepin:crimson:*|*:25|*:25.*|UOS:*:25[0-9][0-9]) distro=deepin25 ;;
+      deepin:beige:*|deepin:*:23|deepin:*:23.*) distro=deepin23 ;;
+      *) source_install "$name ${VERSION_ID:-$VERSION_CODENAME} 没有匹配的预编译包（有 deepin 23、25 和 UOS V25 的；deepin 20 / UOS 20 没有 GTK 4，暂不支持）" ;;
     esac
-    [[ "$deb_arch" == amd64 ]] || source_install "deepin 的预编译包只有 x86_64；$machine 请从源码构建"
+    [[ "$deb_arch" == amd64 ]] || source_install "$name 的预编译包只有 x86_64；$machine 请从源码构建"
     manager=apt-get
     return
   fi

@@ -16,7 +16,7 @@ WowType 是 Fcitx 5 的输入法插件。安装时需要让插件、Fcitx 5 和�
 | Manjaro | 本机 `makepkg` | 使用自己的软件源，脚本不会自动套用 Arch 包 |
 | Ubuntu 22.04 / 24.04 / 26.04 | 对应版本 deb | amd64、arm64；不跨 Ubuntu 版本混装。22.04 上 GNOME 扩展用不了，见[下面](#ubuntu-2204fcitx5-50) |
 | Debian 13 / 13.x | Debian 13 deb | amd64、arm64 |
-| deepin 23 / 25 | 对应版本 deb | 只有 amd64；不改输入法框架（deepin 默认就是 fcitx5） |
+| deepin 23 / 25、UOS V25 | 对应版本 deb（UOS V25 用 deepin 25 的） | 只有 amd64；不改输入法框架（deepin 默认就是 fcitx5） |
 | Mint / Pop!_OS 等衍生版 | 明确声明兼容基线时使用 deb | `jammy → ubuntu22.04`、`noble → ubuntu24.04`、`resolute → ubuntu26.04`、`trixie → debian13` |
 | Fedora 43 / 44 / 45 | 对应 `.fc<版本>` RPM | x86_64、aarch64；一键安装只匹配当前系统版本 |
 | openSUSE Tumbleweed | 一键安装（本机源码编译）或手动源码安装 | 脚本问过后用 zypper 装编译依赖，下载这一版源码和词库包编译安装 |
