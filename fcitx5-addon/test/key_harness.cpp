@@ -3622,6 +3622,14 @@ struct FakeGrid {
         }
         msg.send();
     }
+
+    /// 点了翻页按钮（#296）：方向是有符号的，-1 上一屏、+1 下一屏。
+    void sendPage(uint32_t serial, int32_t delta) {
+        auto msg = bus->createSignal("/io/github/gloridust/WowType", "io.github.gloridust.WowType.Grid1", "Page");
+        msg.setDestination(addon);
+        msg << serial << delta;
+        msg.send();
+    }
 };
 
 void runGridOverlayCase(Instance &instance, std::function<void()> done) {
@@ -3746,11 +3754,33 @@ void runGridOverlayCase(Instance &instance, std::function<void()> done) {
              check(fake->visible && fake->page == 1 && fake->first == 36 && fake->cursor == 36,
                    s.name + "：下移到第 7 行，扩展收到第二屏，实际第 " + std::to_string(fake->page + 1) +
                        " 屏、第一格 " + std::to_string(fake->first) + "、光标 " + std::to_string(fake->cursor));
+             // 鼠标点翻页按钮（#296）：过时的一屏上点的不算
+             fake->sendPage(fake->serial - 1, -1);
+         }},
+        {11, [fake](VoiceScript &s) {
+             check(fake->visible && fake->page == 1 && fake->first == 36,
+                   s.name + "：过时的一屏上点翻页不算，实际第 " + std::to_string(fake->page + 1) + " 屏");
+             // 点 ‹：回第一屏
+             fake->sendPage(fake->serial, -1);
+         }},
+        {12, [fake](VoiceScript &s) {
+             check(fake->visible && fake->page == 0 && fake->first == 0 && fake->cursor < 36 &&
+                       fake->cells.size() == 36 && s.ic->committed.empty(),
+                   s.name + "：点 ‹ 回第一屏，实际第 " + std::to_string(fake->page + 1) + " 屏、第一格 " +
+                       std::to_string(fake->first) + "、光标 " + std::to_string(fake->cursor));
+             // 点 ›：又到第二屏
+             fake->sendPage(fake->serial, 1);
+         }},
+        {13, [fake](VoiceScript &s) {
+             check(fake->visible && fake->page == 1 && fake->first == 36 && fake->cursor >= 36 &&
+                       preedit(s.ic.get()).empty(),
+                   s.name + "：点 › 到第二屏，实际第 " + std::to_string(fake->page + 1) + " 屏、第一格 " +
+                       std::to_string(fake->first) + "、光标 " + std::to_string(fake->cursor));
              // 失去焦点：网格收起
              fake->hides = 0;
              s.ic->focusOut();
          }},
-        {11, [fake, firstPage](VoiceScript &s) {
+        {14, [fake, firstPage](VoiceScript &s) {
              check(fake->hides > 0 && !fake->visible, s.name + "：失去焦点，网格收起");
              s.ic->focusIn();
              // 右键「忘掉这个词」（#229）：先学一个词（shi 的第 4 个选三次），展开以后它那一格能忘
@@ -3764,7 +3794,7 @@ void runGridOverlayCase(Instance &instance, std::function<void()> done) {
              fresh(s.ic.get());
              type(s.ic.get(), "shi<down>");
          }},
-        {12, [fake, firstPage](VoiceScript &s) {
+        {15, [fake, firstPage](VoiceScript &s) {
              const std::string word = firstPage->size() > 3 ? (*firstPage)[3] : "";
              const auto at = std::find(fake->cells.begin(), fake->cells.end(), word);
              const std::size_t i = at - fake->cells.begin();
@@ -3779,7 +3809,7 @@ void runGridOverlayCase(Instance &instance, std::function<void()> done) {
                  fake->send("Forget", fake->serial - 1, fake->first + static_cast<uint32_t>(i));
              }
          }},
-        {13, [fake, firstPage](VoiceScript &s) {
+        {16, [fake, firstPage](VoiceScript &s) {
              const std::string word = firstPage->size() > 3 ? (*firstPage)[3] : "";
              const auto at = std::find(fake->cells.begin(), fake->cells.end(), word);
              check(fake->shows == 0 && at != fake->cells.end() && fake->forgettable[at - fake->cells.begin()] == 1,
@@ -3792,7 +3822,7 @@ void runGridOverlayCase(Instance &instance, std::function<void()> done) {
                  fake->send("Forget", fake->serial, fake->first + static_cast<uint32_t>(at - fake->cells.begin()));
              }
          }},
-        {14, [fake, firstPage](VoiceScript &s) {
+        {17, [fake, firstPage](VoiceScript &s) {
              const std::string word = firstPage->size() > 3 ? (*firstPage)[3] : "";
              const auto at = std::find(fake->cells.begin(), fake->cells.end(), word);
              check(fake->shows > 0 && fake->visible && s.ic->committed.empty() && fake->header == "shi",
@@ -3811,10 +3841,10 @@ void runGridOverlayCase(Instance &instance, std::function<void()> done) {
              fake->ack = false;
              type(s.ic.get(), "shi<down>");
          }},
-        {15, [listSize](VoiceScript &s) {
+        {18, [listSize](VoiceScript &s) {
              check(listSize(s) == 0, s.name + "：刚展开时还在等扩展，kimpanel 是空列表");
          }},
-        {22, [fake, listSize, framedRows](VoiceScript &s) {
+        {25, [fake, listSize, framedRows](VoiceScript &s) {
              check(listSize(s) > 0 && framedRows(s) && !fake->visible,
                    s.name + "：等不到回执，退回 kimpanel 拼成几行的网格，叫扩展收起：" + join(page(s.ic.get())));
              type(s.ic.get(), "<right>");
@@ -3823,17 +3853,17 @@ void runGridOverlayCase(Instance &instance, std::function<void()> done) {
              fake->ack = true;
              fake->send("Ack", fake->serial);
          }},
-        {23, [listSize](VoiceScript &s) {
+        {26, [listSize](VoiceScript &s) {
              type(s.ic.get(), "<right>");
              check(listSize(s) == 0, s.name + "：迟到的回执来了，又交给扩展画");
          }},
         // 扩展下线：正显示着的网格马上换回 kimpanel 的
-        {24, [grid](VoiceScript &) {
+        {27, [grid](VoiceScript &) {
              grid->show.reset();
              grid->hide.reset();
              grid->bus.reset();
          }},
-        {26, [framedRows](VoiceScript &s) {
+        {29, [framedRows](VoiceScript &s) {
              check(framedRows(s), s.name + "：扩展下线，正显示着的换回 kimpanel 拼好的网格：" +
                                       join(page(s.ic.get())));
              fresh(s.ic.get());

@@ -1279,9 +1279,10 @@ void WowtypeEngine::pageGrid(uint32_t serial, int32_t delta) {
         return;
     }
     auto *state = ic->propertyFor(&factory_);
-    const uint32_t action = delta < 0 ? WOWTYPE_KEY_ACTION_PREV_PAGE
-                                      : WOWTYPE_KEY_ACTION_NEXT_PAGE;
-    const WowtypeFrame *frame = sessionKey(ic, state, fcitx::Key(), action);
+    // 展开面板里会话只认翻页键本身（PageUp / PageDown 挪一屏）：只带翻页动作、不带键的话，
+    // 会话当成别的键，先把面板收起来，再去翻横排的那几个
+    const WowtypeFrame *frame =
+        sessionKey(ic, state, fcitx::Key(delta < 0 ? FcitxKey_Page_Up : FcitxKey_Page_Down));
     if (frame && frame->handled) {
         applySessionFrame(ic, state, frame);
     }
