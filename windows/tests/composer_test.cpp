@@ -793,12 +793,24 @@ int main(int argc, char **argv) {
         auto [c, client] = fresh();
         type(*c, "nihao");
         check(c->isComposing(), "打 nihao 进编辑区");
-        check(client->marked == "ni hao", "编辑区分音节", client->marked);
+        check(client->marked == "ni'hao", "编辑区分音节", client->marked);
         check(client->markedCursor == static_cast<int>(client->marked.size()), "光标在编辑区末尾");
         check(!client->texts().empty() && client->texts()[0] == "你好", "第一个候选是你好", join(client->texts()));
         c->handle(KeyInput::character(' '));
         check(client->committed == "你好", "空格上屏第一个", client->committed);
         check(!c->isComposing() && client->marked.empty() && !client->page, "上屏后清空编辑区和候选框");
+    }
+    {
+        // InlineSpaceSeparator（#247）：输入框里音节用空格分，光标位置不变；默认关，照旧 '
+        Config config;
+        config.setValue("InlineSpaceSeparator", "True");
+        auto [c, client] = fresh(config);
+        type(*c, "nihao");
+        check(client->marked == "ni hao" && client->markedCursor == static_cast<int>(client->marked.size()),
+              "打开 InlineSpaceSeparator：输入框里是 ni hao", client->marked);
+        c->handle(KeyInput::key(keysym::escape));
+        type(*c, "xi'an");
+        check(client->marked == "xi an", "手动分隔的 xi'an 是 xi an", client->marked);
     }
     {
         // 右键「忘掉这个词」（#229，和 macOS、fcitx5 一样）：学过的词才有，按显示的序号忘，光标不挪；

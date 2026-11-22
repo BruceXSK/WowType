@@ -552,6 +552,10 @@ private struct InputPage: View {
                       info: "候选里也列出极少用的生僻字。系统自带的字体一般显示不了，会是方块。",
                       isOn: $model.config.rareExtChars)
             RowDivider()
+            SwitchRow(title: "输入框里的拼音用空格分音节", subtitle: "ni hao，不用 ni'hao；候选框里照旧",
+                      info: "网页里的代码块（比如 ChatGPT）会把 ' 当引号上色，边打边重画，可能留下半截拼音。遇到这种情况时打开。",
+                      isOn: $model.config.inlineSpaceSeparator)
+            RowDivider()
             SwitchRow(title: "中文标点自动配对", subtitle: "打（【《「“‘ 时自动补上右半边",
                       info: "中文标点下打左括号、左引号，上屏成对的，光标放到中间；"
                           + "在里面打完再按右半边，跳过补好的那个，不会多出一个。"

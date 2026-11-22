@@ -129,6 +129,7 @@ const std::vector<SettingDef> &settingDefs() {
         {"FuzzyEngOng", T::Bool, "False"},
         {"TypoCorrection", T::Bool, "True"},
         {"RareExtChars", T::Bool, "False"},
+        {"InlineSpaceSeparator", T::Bool, "False"},
         {"InputScheme", T::Enum, "Quanpin", 0, 0, {"Quanpin", "Shuangpin", "Wubi86"}},
         {"ShuangpinScheme", T::Enum, "Ziranma", 0, 0,
          {"Ziranma", "Xiaohe", "Microsoft", "Sogou", "ABC", "Ziguang", "PinyinJiajia"}},

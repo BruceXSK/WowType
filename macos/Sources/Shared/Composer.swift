@@ -901,9 +901,10 @@ public final class Composer {
             return
         }
         let f = frame.pointee
-        // 输入框里音节之间用空格，不用 '（#247）：网页代码块的语法高亮把 '…' 当字符串，打字时一对引号凑齐
-        // 就重画这一段，浏览器跟丢正在输入的范围，前半截拼音被当成正文留下。空格也是一个字节，光标位置不变
-        let preedit = String(cString: f.preedit).replacingOccurrences(of: "'", with: " ")
+        // InlineSpaceSeparator 开着时输入框里音节之间用空格，不用 '（#247）：网页代码块的语法高亮把 '…' 当字符串，
+        // 打字时一对引号凑齐就重画这一段，浏览器跟丢正在输入的范围，前半截拼音被当成正文留下。空格也是一个字节，光标位置不变
+        let raw = String(cString: f.preedit)
+        let preedit = self.config.inlineSpaceSeparator ? raw.replacingOccurrences(of: "'", with: " ") : raw
         client?.setMarkedText(preedit, cursor: utf16Offset(preedit, byteOffset: Int(f.preedit_cursor)))
         client?.showCandidates(candidatePage(frame))
     }

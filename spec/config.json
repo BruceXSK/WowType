@@ -109,6 +109,8 @@
      "platforms": ["fcitx5", "settings", "macos", "windows"], "note": "按错键自动纠正"},
     {"key": "RareExtChars", "type": "bool", "default": false,
      "platforms": ["fcitx5", "settings", "macos", "windows"], "note": "候选末尾列出扩展 B 区以后的生僻字（常见字体显示不了，默认关）"},
+    {"key": "InlineSpaceSeparator", "type": "bool", "default": false,
+     "platforms": ["fcitx5", "settings", "macos", "windows"], "note": "拼音写在输入框里时音节之间用空格（ni hao），不用 '（ni'hao）；候选框里照旧用 '。网页代码块（比如 ChatGPT）的语法高亮把 '…' 当字符串，边打边重画，会留下半截拼音，遇到时打开（#247）。只是外壳显示，不进核心；空格和 ' 都是一个字节，光标位置不变"},
     {"key": "InputScheme", "type": "enum", "default": "Quanpin",
      "values": [
        {"value": "Quanpin", "name": "拼音输入"},
