@@ -23,6 +23,11 @@ use wowtype_core::{Converter, Engine, Lexicon, MemoryLexicon};
 
 /// 按一串键，和 key_harness 的 type() 一样：<sp> <bs> <cr> <esc> 等是特殊键，其余按字符。
 fn type_keys(session: &mut Session, keys: &str) -> Frame {
+    type_keys_with(session, keys, |key| key)
+}
+
+/// [`type_keys`]，每个键先过一遍 adjust（带上外壳报的周围文字、输入框情况）。
+fn type_keys_with(session: &mut Session, keys: &str, adjust: impl Fn(Key) -> Key) -> Frame {
     let mut frame = session.frame(false);
     let mut rest = keys;
     while let Some(c) = rest.chars().next() {
@@ -50,6 +55,7 @@ fn type_keys(session: &mut Session, keys: &str) -> Frame {
             rest = &rest[c.len_utf8()..];
             Key::char(c)
         };
+        let key = adjust(key);
         frame = session.key(&key);
         // 外壳每个键都送按下和松开，松开不该改变编辑区
         let release = Key {
@@ -4285,30 +4291,82 @@ fn one_shot_translate_key_set_mode_and_password_field() {
     let frame = double_tap(&mut session, 1000);
     assert!(!frame.mode_changed && frame.mode == Mode::Chinese);
     assert!(!session.tick(9000).mode_changed);
+}
+
+/// 带着周围文字（光标前是 prev）按一串键，和外壳每个键都报的情形一样。
+fn type_with_prev(session: &mut Session, keys: &str, prev: Option<char>) -> Frame {
+    use wowtype_core::session::key_hints::SURROUNDING;
+    type_keys_with(session, keys, |key| Key { prev_char: prev, hints: SURROUNDING, ..key })
+}
+
 #[test]
 fn punct_not_halved_by_lagging_surrounding() {
-    // Electron 类应用的周围文本上报滞后：词上屏以后还报着上屏前的 '1'，
-    // 别拿旧状态把句号定成半角（1:1复刻。）
-    use wowtype_core::session::key_hints::SURROUNDING;
+    // Electron 类应用报周围文字慢好几拍（#295）：词上屏以后还报着上屏前的 '1'，
+    // 别拿旧的把句号定成半角（1:1复刻。）
     let mut session = with(engine());
-    assert!(!type_keys(&mut session, "1").handled, "数字原样交给应用");
+    assert!(!type_with_prev(&mut session, "1", None).handled, "数字原样交给应用");
+    assert_eq!(type_with_prev(&mut session, "nihao<sp>", Some('1')).commit.as_deref(), Some("你好"));
     assert_eq!(
-        type_keys(&mut session, "nihao<sp>").commit.as_deref(),
-        Some("你好"),
-        "上屏一个词"
+        type_with_prev(&mut session, ".", Some('1')).commit.as_deref(),
+        Some("。"),
+        "报来的还是上屏前的 '1'：应用没跟上，按会话记的「好」算"
     );
-    // 应用带着 SURROUNDING 报 prev='1'：是上屏之前的旧状态（真实光标前是"好"）
-    let frame = session.key(&key_after('.', Some('1'), SURROUNDING));
-    assert_eq!(frame.commit.as_deref(), Some("。"), "滞后的 '1' 不该把句号定成半角");
-    // 对照：surrounding 如实报 prev='好' 时句号也是全角
+    // 慢不止一拍：接着打的还报着 '1'
+    assert_eq!(type_with_prev(&mut session, ",", Some('1')).commit.as_deref(), Some("，"));
+    // 接着打数字（交给应用，会话自己记着）：后面的点是数字里的，保持英文
+    assert!(!type_with_prev(&mut session, "3", Some('1')).handled);
+    assert!(!type_with_prev(&mut session, ".", Some('1')).handled, "3 后面的点保持英文");
+
+    // 应用如实报了上屏的字：照常
     let mut session = with(engine());
-    assert!(!type_keys(&mut session, "1").handled);
-    assert_eq!(type_keys(&mut session, "nihao<sp>").commit.as_deref(), Some("你好"));
-    let frame = session.key(&key_after('.', Some('好'), SURROUNDING));
-    assert_eq!(frame.commit.as_deref(), Some("。"));
-    // 对照：光标真的在数字后面（会话自己记的上文也是数字，surrounding 一致）——保持半角
+    type_with_prev(&mut session, "1", None);
+    type_with_prev(&mut session, "nihao<sp>", Some('1'));
+    assert_eq!(type_with_prev(&mut session, ".", Some('好')).commit.as_deref(), Some("。"));
+
+    // 光标真的在数字后面（没上过屏）：保持英文
     let mut session = with(engine());
-    assert!(!type_keys(&mut session, "3").handled);
-    let frame = session.key(&key_after('.', Some('3'), SURROUNDING));
-    assert!(!frame.handled, "数字后的点保持英文");
+    assert!(!type_with_prev(&mut session, "3", None).handled);
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled, "数字后的点保持英文");
+}
+
+#[test]
+fn moved_cursor_is_not_taken_for_lagging_surrounding() {
+    // 上屏以后报来的是别的字（不是上屏前的那个）：光标真的挪了，信应用的
+    let mut session = with(engine());
+    type_with_prev(&mut session, "nihao<sp>", Some('x'));
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled, "光标挪到了 3 后面，点保持英文");
+
+    // 上屏以后按了方向键（交给应用）：之后光标前是什么会话不知道，报来的当真
+    let mut session = with(engine());
+    type_with_prev(&mut session, "3", None);
+    type_with_prev(&mut session, "nihao<sp>", Some('3'));
+    assert!(!type_with_prev(&mut session, "<left><left>", Some('3')).handled);
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled, "挪回 3 后面，点保持英文");
+
+    // 失去焦点、点鼠标（外壳调 reset）：也不再当成慢了的
+    let mut session = with(engine());
+    type_with_prev(&mut session, "3", None);
+    type_with_prev(&mut session, "nihao<sp>", Some('3'));
+    session.reset(false);
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled);
+}
+
+#[test]
+fn lagging_surrounding_keeps_context_and_mouse_choice() {
+    // 上文也一样：应用还报着上屏前的样子（光标前没有字）时，不把会话记的上文清掉
+    let mut session = with(context_engine());
+    type_with_prev(&mut session, "bu<sp>", None);
+    type_with_prev(&mut session, "ma", None);
+    assert_eq!(texts(&mut session)[0], "骂", "应用没跟上，上文「不」留着");
+    type_with_prev(&mut session, "<esc>", None);
+    // 跟上了以后光标前真的是别的字：上文换成它
+    type_with_prev(&mut session, "ma", Some('好'));
+    assert_eq!(texts(&mut session)[0], "吗");
+
+    // 鼠标点候选上屏的也算（不经过按键）
+    let mut session = with(engine());
+    type_with_prev(&mut session, "1", None);
+    type_with_prev(&mut session, "nihao", Some('1'));
+    assert_eq!(choose_text(&mut session, "你好").commit.as_deref(), Some("你好"));
+    assert_eq!(type_with_prev(&mut session, ".", Some('1')).commit.as_deref(), Some("。"));
 }

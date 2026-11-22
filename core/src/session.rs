@@ -703,6 +703,12 @@ pub struct Session<'e> {
     /// 上一个键是交给应用的退格：那时外壳报的光标前的字（#260）。应用删字、再报新的周围文字是异步的，
     /// 紧接着的下一个键报来的要是还和退格时一样，多半还是删之前的（删掉的那个数字），不能当真。
     backspace_prev: Option<Option<char>>,
+    /// 上一个键（修饰键不算）时外壳报的光标前的字；没带 [`key_hints::SURROUNDING`] 是 None。
+    reported_prev: Option<Option<char>>,
+    /// 会话上屏那一下外壳报的光标前的字（#295）。有的应用（Electron 系）报周围文字慢好几拍，
+    /// 上屏以后的键报来的还是上屏之前的那个字：只要还和它一样、又和会话自己记的上一个字不一样，
+    /// 就是应用还没跟上，用会话自己记的。报来的变了（跟上了，或者光标真的挪了）就照常信应用的。
+    commit_prev: Option<Option<char>>,
     /// 这次按键时外壳给的输入框情况（[`key_hints`]）。
     hints: u32,
     mode: Mode,
@@ -776,6 +782,8 @@ impl Default for Session<'_> {
             prev_char: None,
             last_char: None,
             backspace_prev: None,
+            reported_prev: None,
+            commit_prev: None,
             hints: 0,
             mode: Mode::Chinese,
             mode_changed: false,
@@ -902,6 +910,30 @@ impl<'e> Session<'e> {
         if stale {
             self.last_char = None;
         }
+        // 上屏以后报来的光标前的字还是上屏之前的那个、和会话自己记的上一个字对不上：应用报周围文字慢了
+        // （Electron 系慢好几拍，#295：「1:1复刻」后面的句号被当成数字后面的，成了半角点），用会话自己记的。
+        // 只认「和上屏前一模一样」：报来的是别的字就是光标真的挪了，照常信应用的。上屏以后把光标点回
+        // 原来那个字后面也会这样当，到下一次上屏为止
+        let modifier_key = is_modifier_keysym(key.keysym);
+        let reported = (key.hints & key_hints::SURROUNDING != 0).then_some(key.prev_char);
+        let lagging = self.commit_prev.is_some()
+            && self.commit_prev == reported
+            && self.last_char.is_some_and(|own| Some(own) != key.prev_char);
+        if !modifier_key {
+            // 外壳报修饰键时可能不带周围文字，不拿它当「报来的变了」
+            self.reported_prev = reported;
+            if !lagging {
+                self.commit_prev = None;
+            }
+        }
+        let key = &if lagging {
+            Key {
+                prev_char: self.last_char,
+                ..*key
+            }
+        } else {
+            *key
+        };
         self.prev_char = key.prev_char;
         self.next_char = key.next_char;
         if !matches!(key.keysym, keysym::SHIFT_L | keysym::SHIFT_R) {
@@ -917,29 +949,10 @@ impl<'e> Session<'e> {
             }
         }
         let surrounding = key.hints & key_hints::SURROUNDING != 0;
-        // 应用报的光标前的字和会话自己记的上一个字对不上：多半是应用（Electron 系）的
-        // 周围文本上报滞后，还停在上屏之前的状态（上屏词以后句号被当成数字后面的半角）。
-        // 当作不知道；真是用户挪了光标，下一拍上报和记忆对上了就自动恢复
-        let lagging = surrounding
-            && !self.composing()
-            && key.prev_char.is_some_and(|reported| {
-                self.last_char.is_some_and(|own| own != reported)
-            });
-        let key = &if lagging {
-            Key {
-                prev_char: None,
-                hints: key.hints & !key_hints::SURROUNDING,
-                ..*key
-            }
-        } else {
-            *key
-        };
-        if lagging {
-            self.last_char = None;
-        } else if key.prev_char.is_some() || surrounding {
+        if key.prev_char.is_some() || surrounding {
             self.last_char = key.prev_char;
         }
-        if !lagging && surrounding {
+        if surrounding {
             self.check_context(key.prev_char);
         }
         let handled = match self.association_key(key) {
@@ -957,8 +970,15 @@ impl<'e> Session<'e> {
                 self.set_context("");
             }
             if key.keysym == keysym::BACKSPACE && !self.composing() {
-                self.backspace_prev = Some(key.prev_char);
+                self.backspace_prev = Some(reported.flatten().or(key.prev_char));
                 self.last_char = None;
+            }
+            // 应用自己会打上的字（数字、半角标点、英文模式的字母）会话记了；别的键（方向键、退格、回车、
+            // 快捷键）以后光标前是什么会话不知道，报来的不再当成慢了的
+            let typed = key.modifiers & (modifier::CTRL | modifier::ALT | modifier::SUPER) == 0
+                && char::from_u32(key.keysym).is_some_and(|c| c.is_ascii_graphic());
+            if !typed {
+                self.commit_prev = None;
             }
             self.pair_key_passed(key);
         }
@@ -2824,6 +2844,8 @@ impl<'e> Session<'e> {
         self.last_choice = None;
         // 切走输入法、失去焦点、点鼠标挪了光标（应用会重置输入法）：会话看不到之后光标去了哪
         self.pairs.clear();
+        self.reported_prev = None;
+        self.commit_prev = None;
         self.close_association();
         self.last_choice_index = 0;
         if commit_pending && self.composing() {
@@ -2855,6 +2877,10 @@ impl<'e> Session<'e> {
         let (shown, shown_caret) = self.segmented_remaining();
         let preedit_cursor = selected.len() + shown_caret;
         let preedit = selected + &shown;
+        if self.pending.is_some() && self.commit_prev.is_none() {
+            // 这次调用有字上屏（按键、鼠标点候选都走这里）：记下上屏前外壳报的光标前的字，见 commit_prev
+            self.commit_prev = self.reported_prev;
+        }
         let mut frame = Frame {
             handled,
             commit: self.pending.take(),
