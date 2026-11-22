@@ -47,10 +47,26 @@
   margin-right: 0.35em;
 }
 
+.wowtype-grid-pager {
+  spacing: 2px;
+  padding: 0.2em 0.35em 0 0;
+}
+
 .wowtype-grid-page {
   font-size: 0.8em;
-  padding: 0.2em 0.6em 0 0;
+  padding: 0 0.25em;
   color: rgba(127, 127, 127, 0.9);
+}
+
+.wowtype-grid-page-btn {
+  font-size: 0.95em;
+  padding: 0.05em 0.45em;
+  border-radius: 6px;
+  color: rgba(127, 127, 127, 0.95);
+}
+
+.wowtype-grid-page-btn:hover {
+  background-color: rgba(14, 175, 118, 0.16);
 }
 
 /* 展开面板网格上右键的小菜单「忘掉这个词」（#229），外观照 popup-menu */
