@@ -224,6 +224,8 @@ FCITX_CONFIGURATION(
     fcitx::Option<bool> fuzzyEngOng{this, "FuzzyEngOng", "模糊音：eng = ong", false};
     fcitx::Option<bool> typo{this, "TypoCorrection", "按错键自动纠正", true};
     fcitx::Option<bool> rareExt{this, "RareExtChars", "候选末尾列出扩展 B 区以后的生僻字", false};
+    fcitx::Option<bool> inlineSpace{this, "InlineSpaceSeparator",
+                                    "输入框里的拼音用空格分音节（网页代码块里留下半截拼音时打开）", false};
     fcitx::Option<WowtypeInputScheme, fcitx::NoConstrain<WowtypeInputScheme>,
                   fcitx::DefaultMarshaller<WowtypeInputScheme>, WowtypeInputSchemeAnnotation>
         inputScheme{this, "InputScheme", "输入方案", WowtypeInputScheme::Quanpin};
@@ -663,6 +665,7 @@ private:
     unsigned fuzzyGroups_ = 0;
     bool typo_ = true;
     bool rareExt_ = false;
+    bool inlineSpace_ = false; // InlineSpaceSeparator：输入框里的拼音用空格分音节（#247）
     WowtypeSelectKeys selectKeys_ = WowtypeSelectKeys::Off;
     bool pickChar_ = true;
     bool association_ = false;

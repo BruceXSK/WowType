@@ -221,6 +221,8 @@ public struct WowtypeConfig: Equatable {
     public var fuzzyEngOng = false
     public var typoCorrection = true
     public var rareExtChars = false
+    /// 输入框里的拼音用空格分音节（ni hao），不用 '；网页代码块里留下半截拼音时打开（#247）
+    public var inlineSpaceSeparator = false
     public var inputScheme = InputScheme.quanpin
     public var shuangpinScheme = "Ziranma"
     /// 双拼时编辑区显示打的键（uivs），不翻成全拼（#122）
@@ -412,7 +414,7 @@ public struct WowtypeConfig: Equatable {
         "Fuzzy", "FuzzyZh", "FuzzyCh", "FuzzySh", "FuzzyNL", "FuzzyFH", "FuzzyRL",
         "FuzzyAn", "FuzzyEn", "FuzzyIn", "FuzzyIan", "FuzzyUan", "FuzzyUn",
         "FuzzyAnAi", "FuzzyHuangWang", "FuzzyUnIong", "FuzzyEngOng",
-        "TypoCorrection", "RareExtChars", "InputScheme", "ShuangpinScheme", "ShuangpinShowKeys",
+        "TypoCorrection", "RareExtChars", "InlineSpaceSeparator", "InputScheme", "ShuangpinScheme", "ShuangpinShowKeys",
         "ShuangpinAbbrev", "WubiAutoCommit", "WubiHint", "ShiftToggle", "InitialMode", "WindowMode",
         "Traditional",
         "PunctuationStyle", "AutoPairPunct", "DateTime", "Calculator", "EmojiSuggest", "AutoSpace", "AutoSpaceLetters",
@@ -433,6 +435,7 @@ public struct WowtypeConfig: Equatable {
         "FuzzyUn": \.fuzzyUn, "FuzzyAnAi": \.fuzzyAnAi, "FuzzyHuangWang": \.fuzzyHuangWang,
         "FuzzyUnIong": \.fuzzyUnIong, "FuzzyEngOng": \.fuzzyEngOng,
         "TypoCorrection": \.typoCorrection, "RareExtChars": \.rareExtChars,
+        "InlineSpaceSeparator": \.inlineSpaceSeparator,
         "ShuangpinShowKeys": \.shuangpinShowKeys, "ShuangpinAbbrev": \.shuangpinAbbrev, "WubiAutoCommit": \.wubiAutoCommit, "WubiHint": \.wubiHint,
         "Traditional": \.traditional, "AutoPairPunct": \.autoPairPunct, "PickChar": \.pickChar, "Association": \.association,
         "DateTime": \.dateTime, "Calculator": \.calculator, "EmojiSuggest": \.emojiSuggest,
@@ -722,6 +725,8 @@ public struct WowtypeConfig: Equatable {
         TypoCorrection=\(b(d.typoCorrection))
         # 候选末尾也列出扩展 B 区以后的生僻字（常见字体显示不了，默认关）
         RareExtChars=\(b(d.rareExtChars))
+        # 输入框里的拼音用空格分音节（ni hao），不用 '；网页代码块里留下半截拼音时打开
+        InlineSpaceSeparator=\(b(d.inlineSpaceSeparator))
 
         # 输入方案：Quanpin 全拼、Shuangpin 双拼、Wubi86 五笔 86
         InputScheme=\(d.inputScheme.rawValue)

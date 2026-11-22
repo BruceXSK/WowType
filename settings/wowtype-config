@@ -350,6 +350,7 @@ DEFAULTS = {
     "FuzzyEngOng": "False",
     "TypoCorrection": "True",
     "RareExtChars": "False",
+    "InlineSpaceSeparator": "False",
     "InputScheme": "Quanpin",
     "ShuangpinScheme": "Ziranma",
     "ShuangpinShowKeys": "False",
@@ -6308,6 +6309,11 @@ class SettingsWindow(Adw.ApplicationWindow):
         rare = self.make_switch("RareExtChars", "更多生僻字", "要装能显示它们的字体，比如 fonts-hanazono")
         self.add_info(rare, "候选里也列出极少用的生僻字。系统自带的字体一般显示不了，会是方块。")
         pinyin.add(rare)
+        inline_space = self.make_switch(
+            "InlineSpaceSeparator", "输入框里的拼音用空格分音节", "ni hao，不用 ni'hao；候选框里照旧")
+        self.add_info(inline_space, "网页里的代码块（比如 ChatGPT）会把 ' 当引号上色，边打边重画，"
+                                    "可能留下半截拼音。遇到这种情况时打开。")
+        pinyin.add(inline_space)
         auto_pair = self.make_switch("AutoPairPunct", "中文标点自动配对", "打（【《「“‘ 时自动补上右半边")
         self.add_info(auto_pair, "中文标点下打左括号、左引号，上屏成对的，光标放到中间；"
                                  "在里面打完再按右半边，跳过补好的那个，不会多出一个。"
