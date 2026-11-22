@@ -225,6 +225,7 @@ constexpr uint64_t kOverlayAckUsec = 800 * 1000;
 //   扩展 -> 插件  Ack(u serial)            画好了、显示出来了
 //                 Select(u serial, u 下标)  点了一格（全局下标）
 //                 Forget(u serial, u 下标)  右键点了一格、选了「忘掉这个词」（#229）
+//                 Page(u serial, i 方向)    点了翻页按钮（-1 上一页，+1 下一页）
 // 光标矩形和语音浮条、kimpanel 的一样。扩展回执期间 kimpanel 拿到的是一个空列表（提示、编辑区也挪进网格），
 // 它的候选框整个不画；扩展没登记这个名字（没装、停用了、只会画语音浮条的旧版）就照旧把网格拼成几行给 kimpanel，
 // 发了 kGridAckUsec 还没有回执也退回去。
@@ -1043,6 +1044,7 @@ void WowtypeEngine::setupOverlays() {
         gridEventWatchers_.clear();
         gridSelectSlot_.reset();
         gridForgetSlot_.reset();
+        gridPageSlot_.reset();
         gridAckSlot_.reset();
         gridWatch_.reset();
         gridOwner_.clear();
@@ -1164,6 +1166,17 @@ void WowtypeEngine::setupGridOverlay() {
             }
             return true;
         });
+    gridPageSlot_ = overlayBus_->addMatch(
+        fcitx::dbus::MatchRule(kGridService, kOverlayPath, kGridInterface, "Page"),
+        [this](fcitx::dbus::Message &msg) {
+            uint32_t serial = 0;
+            int32_t delta = 0;
+            msg >> serial >> delta;
+            if (msg && msg.sender() == gridOwner_) {
+                pageGrid(serial, delta);
+            }
+            return true;
+        });
     for (const auto type :
          {fcitx::EventType::InputContextUpdateUI, fcitx::EventType::InputContextFocusOut}) {
         gridEventWatchers_.push_back(instance_->watchEvent(
@@ -1258,6 +1271,20 @@ void WowtypeEngine::forgetGridCell(uint32_t serial, uint32_t index) {
         return;
     }
     forgetCandidate(ic, ic->propertyFor(&factory_), index);
+}
+
+void WowtypeEngine::pageGrid(uint32_t serial, int32_t delta) {
+    auto *ic = gridIc_.get();
+    if (!ic || serial != gridSerial_ || delta == 0) {
+        return;
+    }
+    auto *state = ic->propertyFor(&factory_);
+    const uint32_t action = delta < 0 ? WOWTYPE_KEY_ACTION_PREV_PAGE
+                                      : WOWTYPE_KEY_ACTION_NEXT_PAGE;
+    const WowtypeFrame *frame = sessionKey(ic, state, fcitx::Key(), action);
+    if (frame && frame->handled) {
+        applySessionFrame(ic, state, frame);
+    }
 }
 
 void WowtypeEngine::onGridUiEvent(fcitx::Event &event) {

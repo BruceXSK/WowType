@@ -624,6 +624,7 @@ private:
     void selectGridCell(uint32_t serial, uint32_t index);
     /// 扩展上右键点了一格、选了「忘掉这个词」（#229）。
     void forgetGridCell(uint32_t serial, uint32_t index);
+    void pageGrid(uint32_t serial, int32_t delta);
     /// 输入框换了面板（收起、上屏、失去焦点）：网格跟着收起。
     void onGridUiEvent(fcitx::Event &event);
     /// 在会话总线上登记 org.wowtype.Input（外部命令切模式）。
@@ -801,6 +802,7 @@ private:
     std::unique_ptr<fcitx::dbus::Slot> gridAckSlot_;
     std::unique_ptr<fcitx::dbus::Slot> gridSelectSlot_;
     std::unique_ptr<fcitx::dbus::Slot> gridForgetSlot_;
+    std::unique_ptr<fcitx::dbus::Slot> gridPageSlot_;
     std::string gridOwner_;
     uint32_t gridSerial_ = 0;
     uint32_t gridAckedSerial_ = 0;
