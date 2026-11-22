@@ -3435,6 +3435,11 @@ impl<'e> Session<'e> {
     fn commit_with(&mut self, tail: &str, tail_pinyin: &str) {
         let text = self.selected_text() + tail;
         self.commit_start = Some(self.learn_mark());
+        // 从候选框里选的原始英文串：拼音就是原串的小写（Verah / verah）。
+        // 回车、标点上屏的原始串传的是空拼音，不会走到这里——终端里的密码照样不学。
+        let english = !tail.is_empty()
+            && tail.bytes().all(|b| b.is_ascii_alphabetic())
+            && tail.eq_ignore_ascii_case(tail_pinyin);
         // 回车、打字途中按标点上屏的原始字母串（没有拼音）不记：排序用不上它（原始串和英文候选的位置
         // 不看选词记录，没有拼音也收不进用户词库），记下来只是在 history.tsv 里留一份明文——
         // 终端里的 sudo 提示没有密码框标记，中文模式下打密码再回车，密码就这样进了输入习惯
@@ -3442,12 +3447,19 @@ impl<'e> Session<'e> {
         let learns = !self.selections.is_empty() || (!tail.is_empty() && !raw_tail);
         if self.engine.is_some() && learns && !self.wubi() && !self.sensitive() {
             self.learned = true;
-            if !tail.is_empty() && !raw_tail {
+            if english {
+                // 选够次数后收进用户英文词表，下次打 verah 还原成 Verah 并排首选。
+                // 不走普通选词：w 行不存纯 ASCII，收进拼音词库也没有合法读音。
+                if let Some(engine) = self.engine {
+                    engine.record_english_selection(tail);
+                }
+            } else if !tail.is_empty() && !raw_tail {
                 // 带上拼音：选够次数后引擎会自动把这个词收进用户词库
                 self.learn(tail, tail_pinyin);
             }
             // 以词定字取出来的字对不上读音时拼音是空的，这样拼成的不学
-            if !self.selections.is_empty()
+            if !english
+                && !self.selections.is_empty()
                 && !tail.is_empty()
                 && !tail_pinyin.is_empty()
                 && self.selections.iter().all(|s| !s.pinyin.is_empty())
