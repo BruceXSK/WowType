@@ -1148,7 +1148,7 @@ impl Engine {
     }
 
     /// [`Engine::forget_word`] 会不会忘掉什么：word 学过（在用户词库里、有选词热度、是攒着的新词、
-    /// 有它在前的搭配），又不是设置里加的自定义词。只看不改，候选框的右键菜单据此决定给不给「忘掉这个词」，
+    /// 有它在前的搭配、是从候选框里选过的英文原串），又不是设置里加的自定义词。只看不改，候选框的右键菜单据此决定给不给「忘掉这个词」，
     /// 展开面板一屏 36 个都要问，所以每样只查一次表：它在后的搭配要扫一遍全部搭配，不看（选过它才有这种搭配，
     /// 那时也记了选词热度）。
     pub fn can_forget(&self, word: &str) -> bool {
@@ -1161,6 +1161,8 @@ impl Engine {
             || self.history.read().is_ok_and(|h| h.contains_key(word))
             || self.new_words.read().is_ok_and(|n| n.contains_key(word))
             || self.pairs.read().is_ok_and(|p| p.has_prev(word))
+            || learn::english_word_key(word)
+                .is_some_and(|key| self.user_english.read().is_ok_and(|e| e.contains_key(&key)))
     }
 
     pub fn user_words(&self) -> Vec<(String, String, f64)> {
@@ -5196,8 +5198,11 @@ mod tests {
         assert_eq!(texts("verah"), ["Verah"], "{:?}", texts("verah"));
         assert_eq!(texts("Verah")[0], "Verah");
 
+        // 右键菜单据此给「忘掉这个词」：选过的英文原串能忘，没选过的不给
+        assert!(e.can_forget("Verah") && !e.can_forget("Zoey"));
         // 忘掉以后回到没学过的样子
         assert!(e.forget_word("Verah"));
+        assert!(!e.can_forget("Verah"));
         assert_eq!(e.learned_english("verah"), None);
         assert_eq!(texts("verah")[0], "个大和");
     }
