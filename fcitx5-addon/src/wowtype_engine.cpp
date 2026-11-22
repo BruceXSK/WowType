@@ -183,6 +183,14 @@ void setClientPreedit(fcitx::InputPanel &panel, const fcitx::Text &text) {
     panel.setClientPreedit(shown);
 }
 
+/// 写进输入框的拼音：音节之间的 ' 换成空格（#247）。网页里的代码块会给 '…' 上语法高亮，打字时一对引号
+/// 刚凑齐（ni'zai'g）编辑器就重画这一段，浏览器跟丢了正在输入的范围，前半截拼音被当成正文留下。
+/// 空格和 ' 一样是一个字节，会话给的光标位置不用改；候选框里的编辑区照旧用 '。
+std::string inlineSyllables(std::string text) {
+    std::replace(text.begin(), text.end(), '\'', ' ');
+    return text;
+}
+
 std::string userConfigDir() {
     if (const char *config = std::getenv("XDG_CONFIG_HOME"); config && *config) {
         return std::string(config) + "/wowtype";
@@ -2322,7 +2330,8 @@ void WowtypeEngine::updateInputPanel(fcitx::InputContext *ic,
         // 编辑区：已选的词 + 还没选的拼音（带下划线）；光标位置会话给（左右键能移到拼音中间，#129）
         fcitx::Text preedit;
         preedit.append(state->selectedText());
-        preedit.append(segmentedRemaining(state), fcitx::TextFormatFlag::Underline);
+        const std::string pinyin = segmentedRemaining(state);
+        preedit.append(inlinePreedit(ic) ? inlineSyllables(pinyin) : pinyin, fcitx::TextFormatFlag::Underline);
         const WowtypeFrame *frame = wowtype_session_frame(state->session_);
         const std::size_t cursor = frame && frame->preedit ? frame->preedit_cursor : preedit.textLength();
         preedit.setCursor(static_cast<int>(std::min(cursor, preedit.textLength())));

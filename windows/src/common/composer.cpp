@@ -564,7 +564,11 @@ void Composer::refresh() {
         client_->showCandidates(nullptr);
         return;
     }
-    client_->setMarkedText(str(frame->preedit), frame->preedit_cursor);
+    // 输入框里音节之间用空格，不用 '（#247）：网页代码块的语法高亮把 '…' 当字符串，打字时一对引号凑齐
+    // 就重画这一段，浏览器跟丢正在输入的范围，前半截拼音被当成正文留下。空格也是一个字节，光标位置不变
+    std::string preedit = str(frame->preedit);
+    std::replace(preedit.begin(), preedit.end(), '\'', ' ');
+    client_->setMarkedText(preedit, frame->preedit_cursor);
     const auto page = candidatePage(frame);
     client_->showCandidates(page ? &*page : nullptr);
 }
