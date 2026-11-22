@@ -810,7 +810,9 @@ int main(int argc, char **argv) {
               "打开 InlineSpaceSeparator：输入框里是 ni hao", client->marked);
         c->handle(KeyInput::key(keysym::escape));
         type(*c, "xi'an");
-        check(client->marked == "xi an", "手动分隔的 xi'an 是 xi an", client->marked);
+        // 后面怎么切看词库（小词库里 an 可能切成 a'n），这里只看输入框里没有 '
+        check(client->marked.rfind("xi ", 0) == 0 && client->marked.find('\'') == std::string::npos,
+              "手动分隔的 xi'an：输入框里没有 '", client->marked);
     }
     {
         // 右键「忘掉这个词」（#229，和 macOS、fcitx5 一样）：学过的词才有，按显示的序号忘，光标不挪；
