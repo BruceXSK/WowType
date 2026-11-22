@@ -258,6 +258,11 @@ fn fixed_time() -> Option<LocalTime> {
 }
 
 fn with(engine: &'static Engine) -> Session<'static> {
+    with_engine(engine)
+}
+
+/// 借用调用方自己的引擎（不必为了 `'static` 泄漏它）。
+fn with_engine(engine: &Engine) -> Session<'_> {
     let mut session = Session::with_engine(engine);
     session.set_clock(fixed_time);
     session
@@ -3248,6 +3253,73 @@ fn raw_letters_committed_with_enter_are_not_learned() {
     assert_eq!(frame.commit.as_deref(), Some("拼ge"));
     assert_eq!(engine.history_count("ge"), 0);
     assert!(engine.history_count("拼") >= 1);
+}
+
+/// 从候选框里选未收录的英文原串（#297）：选够 3 次收进用户英文词表，以后小写也还原大小写、
+/// 排到首选；回车上屏的不算，退格撤销第三次选择时也退回没学。
+#[test]
+fn selected_english_original_is_learned() {
+    let lexicon: Arc<dyn Lexicon> = Arc::new(
+        MemoryLexicon::from_tsv_str("ge\t个\t1000\nda\t大\t1000\nhe\t和\t1000\n").unwrap(),
+    );
+    let engine = Engine::new(lexicon, Arc::new(BigramLm::default()));
+
+    // 回车三次不算学会
+    for _ in 0..3 {
+        let mut session = with_engine(&engine);
+        assert_eq!(
+            type_keys(&mut session, "Verah<cr>").commit.as_deref(),
+            Some("Verah")
+        );
+    }
+    assert_eq!(engine.learned_english("verah"), None, "回车上屏的原始串不学");
+
+    // 候选框里选三次：收下
+    for _ in 0..3 {
+        let mut session = with_engine(&engine);
+        type_keys(&mut session, "Verah");
+        assert_eq!(
+            choose_text(&mut session, "Verah").commit.as_deref(),
+            Some("Verah")
+        );
+    }
+    assert_eq!(engine.learned_english("verah").as_deref(), Some("Verah"));
+    let mut session = with_engine(&engine);
+    type_keys(&mut session, "verah");
+    assert_eq!(texts(&mut session)[0], "Verah", "{:?}", texts(&mut session));
+
+    // 上屏后紧接着退格：撤销第三次选择，退回还没收下
+    let lexicon: Arc<dyn Lexicon> = Arc::new(
+        MemoryLexicon::from_tsv_str("ge\t个\t1000\nda\t大\t1000\nhe\t和\t1000\n").unwrap(),
+    );
+    let undo_engine = Engine::new(lexicon, Arc::new(BigramLm::default()));
+    for _ in 0..2 {
+        undo_engine.record_english_selection("Verah");
+    }
+    let mut session = with_engine(&undo_engine);
+    type_keys(&mut session, "Verah");
+    assert_eq!(
+        choose_text(&mut session, "Verah").commit.as_deref(),
+        Some("Verah")
+    );
+    assert_eq!(
+        undo_engine.learned_english("verah").as_deref(),
+        Some("Verah")
+    );
+    type_keys(&mut session, "<bs>");
+    assert_eq!(
+        undo_engine.learned_english("verah"),
+        None,
+        "退格要撤销第三次选择"
+    );
+
+    // Ctrl+Delete 忘掉以后回到没学过的样子
+    let mut session = with_engine(&engine);
+    type_keys(&mut session, "verah");
+    assert_eq!(texts(&mut session)[0], "Verah");
+    assert!(session.key(&ctrl(keysym::DELETE)).forgot);
+    assert_eq!(engine.learned_english("verah"), None);
+    assert_eq!(texts(&mut session)[0], "个大和");
 }
 
 /// 还没选词的部分有长度上限：超出的键吃掉，不进编辑区，也不漏给应用。
