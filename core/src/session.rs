@@ -703,6 +703,13 @@ pub struct Session<'e> {
     /// 上一个键是交给应用的退格：那时外壳报的光标前的字（#260）。应用删字、再报新的周围文字是异步的，
     /// 紧接着的下一个键报来的要是还和退格时一样，多半还是删之前的（删掉的那个数字），不能当真。
     backspace_prev: Option<Option<char>>,
+    /// 上一个键（修饰键不算）时外壳报的光标前的字；没带 [`key_hints::SURROUNDING`] 是 None。
+    reported_prev: Option<Option<char>>,
+    /// 会话上屏那一下外壳报的光标前的字（#295）。有的应用（Electron 系）报周围文字慢好几拍，
+    /// 上屏以后的键报来的还是上屏之前的那个字：只要还和它一样、又和会话自己记的上一个字不一样，
+    /// 就是应用还没跟上，用会话自己记的。报来的变了（跟上了，或者光标真的挪了）就照常信应用的；
+    /// 报的是光标前没有字时不算（空输入框上屏以后又被应用清空）。
+    commit_prev: Option<Option<char>>,
     /// 这次按键时外壳给的输入框情况（[`key_hints`]）。
     hints: u32,
     mode: Mode,
@@ -776,6 +783,8 @@ impl Default for Session<'_> {
             prev_char: None,
             last_char: None,
             backspace_prev: None,
+            reported_prev: None,
+            commit_prev: None,
             hints: 0,
             mode: Mode::Chinese,
             mode_changed: false,
@@ -902,6 +911,31 @@ impl<'e> Session<'e> {
         if stale {
             self.last_char = None;
         }
+        // 上屏以后报来的光标前的字还是上屏之前的那个、和会话自己记的上一个字对不上：应用报周围文字慢了
+        // （Electron 系慢好几拍，#295：「1:1复刻」后面的句号被当成数字后面的，成了半角点），用会话自己记的。
+        // 只认「和上屏前一模一样」：报来的是别的字就是光标真的挪了，照常信应用的。上屏以后把光标点回
+        // 原来那个字后面也会这样当，到下一次上屏为止。光标前没有字的不算：空的输入框里上屏、
+        // 应用又把它清空了（聊天框点了发送）很常见，那时上文要作废
+        let modifier_key = is_modifier_keysym(key.keysym);
+        let reported = (key.hints & key_hints::SURROUNDING != 0).then_some(key.prev_char);
+        let lagging = key.prev_char.is_some()
+            && self.commit_prev == reported
+            && self.last_char.is_some_and(|own| Some(own) != key.prev_char);
+        if !modifier_key {
+            // 外壳报修饰键时可能不带周围文字，不拿它当「报来的变了」
+            self.reported_prev = reported;
+            if !lagging {
+                self.commit_prev = None;
+            }
+        }
+        let key = &if lagging {
+            Key {
+                prev_char: self.last_char,
+                ..*key
+            }
+        } else {
+            *key
+        };
         self.prev_char = key.prev_char;
         self.next_char = key.next_char;
         if !matches!(key.keysym, keysym::SHIFT_L | keysym::SHIFT_R) {
@@ -938,8 +972,15 @@ impl<'e> Session<'e> {
                 self.set_context("");
             }
             if key.keysym == keysym::BACKSPACE && !self.composing() {
-                self.backspace_prev = Some(key.prev_char);
+                self.backspace_prev = Some(reported.flatten().or(key.prev_char));
                 self.last_char = None;
+            }
+            // 应用自己会打上的字（数字、半角标点、英文模式的字母）会话记了；别的键（方向键、退格、回车、
+            // 快捷键）以后光标前是什么会话不知道，报来的不再当成慢了的
+            let typed = key.modifiers & (modifier::CTRL | modifier::ALT | modifier::SUPER) == 0
+                && char::from_u32(key.keysym).is_some_and(|c| c.is_ascii_graphic());
+            if !typed {
+                self.commit_prev = None;
             }
             self.pair_key_passed(key);
         }
@@ -2805,6 +2846,8 @@ impl<'e> Session<'e> {
         self.last_choice = None;
         // 切走输入法、失去焦点、点鼠标挪了光标（应用会重置输入法）：会话看不到之后光标去了哪
         self.pairs.clear();
+        self.reported_prev = None;
+        self.commit_prev = None;
         self.close_association();
         self.last_choice_index = 0;
         if commit_pending && self.composing() {
@@ -2836,6 +2879,10 @@ impl<'e> Session<'e> {
         let (shown, shown_caret) = self.segmented_remaining();
         let preedit_cursor = selected.len() + shown_caret;
         let preedit = selected + &shown;
+        if self.pending.is_some() && self.commit_prev.is_none() {
+            // 这次调用有字上屏（按键、鼠标点候选都走这里）：记下上屏前外壳报的光标前的字，见 commit_prev
+            self.commit_prev = self.reported_prev;
+        }
         let mut frame = Frame {
             handled,
             commit: self.pending.take(),
@@ -3435,6 +3482,11 @@ impl<'e> Session<'e> {
     fn commit_with(&mut self, tail: &str, tail_pinyin: &str) {
         let text = self.selected_text() + tail;
         self.commit_start = Some(self.learn_mark());
+        // 从候选框里选的原始英文串：拼音就是原串的小写（Verah / verah）。
+        // 回车、标点上屏的原始串传的是空拼音，不会走到这里——终端里的密码照样不学。
+        let english = !tail.is_empty()
+            && tail.bytes().all(|b| b.is_ascii_alphabetic())
+            && tail.eq_ignore_ascii_case(tail_pinyin);
         // 回车、打字途中按标点上屏的原始字母串（没有拼音）不记：排序用不上它（原始串和英文候选的位置
         // 不看选词记录，没有拼音也收不进用户词库），记下来只是在 history.tsv 里留一份明文——
         // 终端里的 sudo 提示没有密码框标记，中文模式下打密码再回车，密码就这样进了输入习惯
@@ -3442,12 +3494,19 @@ impl<'e> Session<'e> {
         let learns = !self.selections.is_empty() || (!tail.is_empty() && !raw_tail);
         if self.engine.is_some() && learns && !self.wubi() && !self.sensitive() {
             self.learned = true;
-            if !tail.is_empty() && !raw_tail {
+            if english {
+                // 选够次数后收进用户英文词表，下次打 verah 还原成 Verah 并排首选。
+                // 不走普通选词：w 行不存纯 ASCII，收进拼音词库也没有合法读音。
+                if let Some(engine) = self.engine {
+                    engine.record_english_selection(tail);
+                }
+            } else if !tail.is_empty() && !raw_tail {
                 // 带上拼音：选够次数后引擎会自动把这个词收进用户词库
                 self.learn(tail, tail_pinyin);
             }
             // 以词定字取出来的字对不上读音时拼音是空的，这样拼成的不学
-            if !self.selections.is_empty()
+            if !english
+                && !self.selections.is_empty()
                 && !tail.is_empty()
                 && !tail_pinyin.is_empty()
                 && self.selections.iter().all(|s| !s.pinyin.is_empty())

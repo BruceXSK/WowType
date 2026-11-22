@@ -23,6 +23,11 @@ use wowtype_core::{Converter, Engine, Lexicon, MemoryLexicon};
 
 /// 按一串键，和 key_harness 的 type() 一样：<sp> <bs> <cr> <esc> 等是特殊键，其余按字符。
 fn type_keys(session: &mut Session, keys: &str) -> Frame {
+    type_keys_with(session, keys, |key| key)
+}
+
+/// [`type_keys`]，每个键先过一遍 adjust（带上外壳报的周围文字、输入框情况）。
+fn type_keys_with(session: &mut Session, keys: &str, adjust: impl Fn(Key) -> Key) -> Frame {
     let mut frame = session.frame(false);
     let mut rest = keys;
     while let Some(c) = rest.chars().next() {
@@ -50,6 +55,7 @@ fn type_keys(session: &mut Session, keys: &str) -> Frame {
             rest = &rest[c.len_utf8()..];
             Key::char(c)
         };
+        let key = adjust(key);
         frame = session.key(&key);
         // 外壳每个键都送按下和松开，松开不该改变编辑区
         let release = Key {
@@ -258,6 +264,11 @@ fn fixed_time() -> Option<LocalTime> {
 }
 
 fn with(engine: &'static Engine) -> Session<'static> {
+    with_engine(engine)
+}
+
+/// 借用调用方自己的引擎（不必为了 `'static` 泄漏它）。
+fn with_engine(engine: &Engine) -> Session<'_> {
     let mut session = Session::with_engine(engine);
     session.set_clock(fixed_time);
     session
@@ -3250,6 +3261,73 @@ fn raw_letters_committed_with_enter_are_not_learned() {
     assert!(engine.history_count("拼") >= 1);
 }
 
+/// 从候选框里选未收录的英文原串（#297）：选够 3 次收进用户英文词表，以后小写也还原大小写、
+/// 排到首选；回车上屏的不算，退格撤销第三次选择时也退回没学。
+#[test]
+fn selected_english_original_is_learned() {
+    let lexicon: Arc<dyn Lexicon> = Arc::new(
+        MemoryLexicon::from_tsv_str("ge\t个\t1000\nda\t大\t1000\nhe\t和\t1000\n").unwrap(),
+    );
+    let engine = Engine::new(lexicon, Arc::new(BigramLm::default()));
+
+    // 回车三次不算学会
+    for _ in 0..3 {
+        let mut session = with_engine(&engine);
+        assert_eq!(
+            type_keys(&mut session, "Verah<cr>").commit.as_deref(),
+            Some("Verah")
+        );
+    }
+    assert_eq!(engine.learned_english("verah"), None, "回车上屏的原始串不学");
+
+    // 候选框里选三次：收下
+    for _ in 0..3 {
+        let mut session = with_engine(&engine);
+        type_keys(&mut session, "Verah");
+        assert_eq!(
+            choose_text(&mut session, "Verah").commit.as_deref(),
+            Some("Verah")
+        );
+    }
+    assert_eq!(engine.learned_english("verah").as_deref(), Some("Verah"));
+    let mut session = with_engine(&engine);
+    type_keys(&mut session, "verah");
+    assert_eq!(texts(&mut session)[0], "Verah", "{:?}", texts(&mut session));
+
+    // 上屏后紧接着退格：撤销第三次选择，退回还没收下
+    let lexicon: Arc<dyn Lexicon> = Arc::new(
+        MemoryLexicon::from_tsv_str("ge\t个\t1000\nda\t大\t1000\nhe\t和\t1000\n").unwrap(),
+    );
+    let undo_engine = Engine::new(lexicon, Arc::new(BigramLm::default()));
+    for _ in 0..2 {
+        undo_engine.record_english_selection("Verah");
+    }
+    let mut session = with_engine(&undo_engine);
+    type_keys(&mut session, "Verah");
+    assert_eq!(
+        choose_text(&mut session, "Verah").commit.as_deref(),
+        Some("Verah")
+    );
+    assert_eq!(
+        undo_engine.learned_english("verah").as_deref(),
+        Some("Verah")
+    );
+    type_keys(&mut session, "<bs>");
+    assert_eq!(
+        undo_engine.learned_english("verah"),
+        None,
+        "退格要撤销第三次选择"
+    );
+
+    // Ctrl+Delete 忘掉以后回到没学过的样子
+    let mut session = with_engine(&engine);
+    type_keys(&mut session, "verah");
+    assert_eq!(texts(&mut session)[0], "Verah");
+    assert!(session.key(&ctrl(keysym::DELETE)).forgot);
+    assert_eq!(engine.learned_english("verah"), None);
+    assert_eq!(texts(&mut session)[0], "个大和");
+}
+
 /// 还没选词的部分有长度上限：超出的键吃掉，不进编辑区，也不漏给应用。
 #[test]
 fn pending_input_is_capped() {
@@ -4213,4 +4291,88 @@ fn one_shot_translate_key_set_mode_and_password_field() {
     let frame = double_tap(&mut session, 1000);
     assert!(!frame.mode_changed && frame.mode == Mode::Chinese);
     assert!(!session.tick(9000).mode_changed);
+}
+
+/// 带着周围文字（光标前是 prev）按一串键，和外壳每个键都报的情形一样。
+fn type_with_prev(session: &mut Session, keys: &str, prev: Option<char>) -> Frame {
+    use wowtype_core::session::key_hints::SURROUNDING;
+    type_keys_with(session, keys, |key| Key { prev_char: prev, hints: SURROUNDING, ..key })
+}
+
+#[test]
+fn punct_not_halved_by_lagging_surrounding() {
+    // Electron 类应用报周围文字慢好几拍（#295）：词上屏以后还报着上屏前的 '1'，
+    // 别拿旧的把句号定成半角（1:1复刻。）
+    let mut session = with(engine());
+    assert!(!type_with_prev(&mut session, "1", None).handled, "数字原样交给应用");
+    assert_eq!(type_with_prev(&mut session, "nihao<sp>", Some('1')).commit.as_deref(), Some("你好"));
+    assert_eq!(
+        type_with_prev(&mut session, ".", Some('1')).commit.as_deref(),
+        Some("。"),
+        "报来的还是上屏前的 '1'：应用没跟上，按会话记的「好」算"
+    );
+    // 慢不止一拍：接着打的还报着 '1'
+    assert_eq!(type_with_prev(&mut session, ",", Some('1')).commit.as_deref(), Some("，"));
+    // 接着打数字（交给应用，会话自己记着）：后面的点是数字里的，保持英文
+    assert!(!type_with_prev(&mut session, "3", Some('1')).handled);
+    assert!(!type_with_prev(&mut session, ".", Some('1')).handled, "3 后面的点保持英文");
+
+    // 应用如实报了上屏的字：照常
+    let mut session = with(engine());
+    type_with_prev(&mut session, "1", None);
+    type_with_prev(&mut session, "nihao<sp>", Some('1'));
+    assert_eq!(type_with_prev(&mut session, ".", Some('好')).commit.as_deref(), Some("。"));
+
+    // 光标真的在数字后面（没上过屏）：保持英文
+    let mut session = with(engine());
+    assert!(!type_with_prev(&mut session, "3", None).handled);
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled, "数字后的点保持英文");
+}
+
+#[test]
+fn moved_cursor_is_not_taken_for_lagging_surrounding() {
+    // 上屏以后报来的是别的字（不是上屏前的那个）：光标真的挪了，信应用的
+    let mut session = with(engine());
+    type_with_prev(&mut session, "nihao<sp>", Some('x'));
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled, "光标挪到了 3 后面，点保持英文");
+
+    // 上屏以后按了方向键（交给应用）：之后光标前是什么会话不知道，报来的当真
+    let mut session = with(engine());
+    type_with_prev(&mut session, "3", None);
+    type_with_prev(&mut session, "nihao<sp>", Some('3'));
+    assert!(!type_with_prev(&mut session, "<left><left>", Some('3')).handled);
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled, "挪回 3 后面，点保持英文");
+
+    // 失去焦点、点鼠标（外壳调 reset）：也不再当成慢了的
+    let mut session = with(engine());
+    type_with_prev(&mut session, "3", None);
+    type_with_prev(&mut session, "nihao<sp>", Some('3'));
+    session.reset(false);
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled);
+}
+
+#[test]
+fn lagging_surrounding_keeps_context_and_mouse_choice() {
+    // 上文也一样：应用还报着上屏前的那个字时，不把会话记的上文换掉
+    let mut session = with(context_engine());
+    type_with_prev(&mut session, "bu<sp>", Some('x'));
+    type_with_prev(&mut session, "ma", Some('x'));
+    assert_eq!(texts(&mut session)[0], "骂", "应用没跟上，上文「不」留着");
+    type_with_prev(&mut session, "<esc>", Some('x'));
+    // 跟上了以后光标前真的是别的字：上文换成它
+    type_with_prev(&mut session, "ma", Some('好'));
+    assert_eq!(texts(&mut session)[0], "吗");
+
+    // 光标前没有字的不算：空输入框里上屏、应用又清空了（聊天框点了发送），上文作废
+    let mut session = with(context_engine());
+    type_with_prev(&mut session, "bu<sp>", None);
+    type_with_prev(&mut session, "ma", None);
+    assert_eq!(texts(&mut session)[0], "吗", "输入框清空了，不拿上一次上屏的「不」当上文");
+
+    // 鼠标点候选上屏的也算（不经过按键）
+    let mut session = with(engine());
+    type_with_prev(&mut session, "1", None);
+    type_with_prev(&mut session, "nihao", Some('1'));
+    assert_eq!(choose_text(&mut session, "你好").commit.as_deref(), Some("你好"));
+    assert_eq!(type_with_prev(&mut session, ".", Some('1')).commit.as_deref(), Some("。"));
 }

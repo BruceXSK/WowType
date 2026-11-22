@@ -114,14 +114,45 @@ export class CandidateGrid {
         this._header = new St.Label({style_class: 'kimpanel-label wowtype-grid-header', visible: false});
         this._layout = new Clutter.GridLayout({column_spacing: 0, row_spacing: 0});
         this._grid = new St.Widget({style_class: 'wowtype-grid', layout_manager: this._layout});
-        this._page = new St.Label({
-            style_class: 'wowtype-grid-page',
+        this._pager = new St.BoxLayout({
+            style_class: 'wowtype-grid-pager',
             x_align: Clutter.ActorAlign.END,
             visible: false,
         });
+        this._prevBtn = new St.Label({
+            style_class: 'wowtype-grid-page-btn',
+            text: '‹',
+            reactive: true,
+            track_hover: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._prevBtn.connect('button-release-event', (_actor, event) => {
+            if (event.get_button() === Clutter.BUTTON_PRIMARY)
+                this._pageStep(-1);
+            return Clutter.EVENT_STOP;
+        });
+        this._page = new St.Label({
+            style_class: 'wowtype-grid-page',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._nextBtn = new St.Label({
+            style_class: 'wowtype-grid-page-btn',
+            text: '›',
+            reactive: true,
+            track_hover: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._nextBtn.connect('button-release-event', (_actor, event) => {
+            if (event.get_button() === Clutter.BUTTON_PRIMARY)
+                this._pageStep(1);
+            return Clutter.EVENT_STOP;
+        });
+        this._pager.add_child(this._prevBtn);
+        this._pager.add_child(this._page);
+        this._pager.add_child(this._nextBtn);
         this._content.add_child(this._header);
         this._content.add_child(this._grid);
-        this._content.add_child(this._page);
+        this._content.add_child(this._pager);
         this._box.bin.set_child(this._content);
 
         // addChrome：X11 下点得到（输入区域），和 kimpanel 一样
@@ -245,6 +276,18 @@ export class CandidateGrid {
         }
     }
 
+    _pageStep(delta) {
+        this._closeMenu();
+        if (!this._shown || !this._sender || !delta)
+            return;
+        try {
+            Gio.DBus.session.emit_signal(this._sender, OBJECT_PATH, INTERFACE, 'Page',
+                new GLib.Variant('(ui)', [this._serial, delta]));
+        } catch (e) {
+            console.error('WowType 展开面板翻页发不出去：', e);
+        }
+    }
+
     // 右键菜单挂在鼠标处，放不下时往左、往上挪进屏幕
     _openMenu(index, [px, py]) {
         this._menuIndex = index;
@@ -292,7 +335,11 @@ export class CandidateGrid {
         this._header.text = header || '';
         this._header.visible = !!header;
         this._page.text = `${page + 1}/${pages}`;
-        this._page.visible = pages > 1;
+        this._pager.visible = pages > 1;
+        this._prevBtn.reactive = page > 0;
+        this._prevBtn.opacity = page > 0 ? 255 : 90;
+        this._nextBtn.reactive = page + 1 < pages;
+        this._nextBtn.opacity = page + 1 < pages ? 255 : 90;
 
         const cursorRow = Math.floor((cursor - first) / cols);
         for (let i = 0; i < Math.max(cells.length, this._cells.length); i++) {

@@ -55,6 +55,32 @@ fn learned_word_survives_save_load() {
 }
 
 #[test]
+fn learned_english_survives_history_save_load() {
+    let lexicon: Arc<dyn Lexicon> =
+        Arc::new(MemoryLexicon::from_tsv_str("ge\t个\t1000\nda\t大\t1000\nhe\t和\t1000\n").unwrap());
+    let path = std::env::temp_dir().join(format!("wowtype_english_{}.tsv", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    {
+        // 第一个「进程」：从候选框里选了三次 Verah
+        let e = Engine::new(lexicon.clone(), Arc::new(BigramLm::default()));
+        for _ in 0..3 {
+            e.record_english_selection("Verah");
+        }
+        e.save_history(&path).expect("保存输入习惯失败");
+    }
+
+    {
+        // 第二个「进程」：还认得 Verah，小写输入也还原大小写并排第一
+        let e = Engine::new(lexicon, Arc::new(BigramLm::default()));
+        assert!(e.load_history(&path).expect("加载输入习惯失败") >= 1);
+        assert_eq!(e.learned_english("verah").as_deref(), Some("Verah"));
+        assert_eq!(e.input("verah")[0].text, "Verah");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn typing_two_words_in_sequence() {
     let e = engine("ni hao\t你好\t10000\nshi jie\t世界\t8000\n");
     assert_eq!(e.input("nihao")[0].text, "你好");
