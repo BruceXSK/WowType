@@ -133,7 +133,7 @@ do {
     let (c, client) = fresh()
     type(c, "nihao")
     check(c.isComposing, "打 nihao 进编辑区")
-    check(client.marked == "ni'hao", "编辑区分音节", client.marked)
+    check(client.marked == "ni hao", "编辑区分音节", client.marked)
     check(client.markedCursor == client.marked.utf16.count, "光标在编辑区末尾", "\(client.markedCursor)")
     check(client.page?.texts.first == "你好", "第一个候选是你好", "\(client.page?.texts ?? [])")
     _ = c.handle(.char(" "))
@@ -400,7 +400,7 @@ do {
     // 不带分音节的隔音符（编辑区是「ni'hao」，上屏的是「nihao」）
     let (c, client) = fresh()
     type(c, "nihao")
-    check(client.marked == "ni'hao", "编辑区分了音节", client.marked)
+    check(client.marked == "ni hao", "编辑区分了音节", client.marked)
     c.commitComposition()
     check(client.committed == "nihao" && client.marked.isEmpty && client.page == nil && !c.isComposing,
           "结束组字时原样上屏字母", client.committed)
@@ -417,7 +417,7 @@ do {
 withConfig({ $0.inputScheme = .shuangpin }) { c, client in
     // 双拼：上屏打的键，不是编辑区里显示的全拼
     type(c, "nihk")
-    check(client.marked == "ni'hao", "双拼编辑区显示全拼", client.marked)
+    check(client.marked == "ni hao", "双拼编辑区显示全拼", client.marked)
     c.commitComposition()
     check(client.committed == "nihk" && client.marked.isEmpty, "结束组字时双拼上屏打的键", client.committed)
 }
@@ -743,7 +743,7 @@ do {
     }
     withWubi { c, client in
         type(c, "znihao")
-        check(client.marked == "zni'hao" && client.page?.texts.first == "你好" && client.page?.comment(0) == "wqvb",
+        check(client.marked == "zni hao" && client.page?.texts.first == "你好" && client.page?.comment(0) == "wqvb",
               "五笔 z 临时拼音带反查的五笔码", "\(client.marked) \(client.page?.texts ?? []) \(client.page?.comments ?? [])")
         _ = c.handle(.char(" "))
         check(client.committed == "你好", "临时拼音上屏", client.committed)

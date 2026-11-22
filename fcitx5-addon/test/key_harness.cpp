@@ -1146,8 +1146,11 @@ void runCases(Instance &instance) {
         const auto client = [&]() { return ic->inputPanel().clientPreedit(); };
         fresh(ic.get());
         type(ic.get(), "nihao");
-        check(client().toString() == "ni'hao" && client().toStringForCommit().empty(),
-              "输入框里的编辑区是 ni'hao，失去焦点时没有要上屏的：[" + client().toStringForCommit() + "]");
+        // 输入框里音节用空格分（#247：网页代码块的语法高亮把 '…' 当字符串，打字时重画、留下半截拼音）
+        check(client().toString() == "ni hao" && client().toStringForCommit().empty(),
+              "输入框里的编辑区是 ni hao，失去焦点时没有要上屏的：[" + client().toStringForCommit() + "]");
+        check(client().cursor() == static_cast<int>(std::string("ni hao").size()),
+              "光标还在拼音末尾：" + std::to_string(client().cursor()));
         ic->focusOut();
         ic->focusIn();
         check(ic->committed.empty() && client().toString().empty(),
@@ -1159,7 +1162,7 @@ void runCases(Instance &instance) {
         if (at != cands.end() && at - cands.begin() < 9) {
             type(ic.get(), std::to_string(at - cands.begin() + 1));
         }
-        check(client().toString() == "你好zhong'guo" && client().toStringForCommit().empty(),
+        check(client().toString() == "你好zhong guo" && client().toStringForCommit().empty(),
               "选了一半的句子也不会被应用上屏：" + client().toString());
         ic->reset();
         check(ic->committed.empty() && client().toString().empty() && preedit(ic.get()).empty(),
@@ -1167,11 +1170,16 @@ void runCases(Instance &instance) {
         // GTK 4.14 的输入框全选（Ctrl+A）时会重置输入法：Ctrl+A 交给应用、编辑区留着，应用一重置就丢掉
         fresh(ic.get());
         type(ic.get(), "nihao");
-        check(!send(ic.get(), Key(FcitxKey_a, KeyState::Ctrl)) && client().toString() == "ni'hao",
+        check(!send(ic.get(), Key(FcitxKey_a, KeyState::Ctrl)) && client().toString() == "ni hao",
               "打字途中 Ctrl+A 交给应用，编辑区留着：" + client().toString());
         ic->reset();
         check(ic->committed.empty() && client().toString().empty(),
               "应用跟着重置输入框：丢掉，不留 ni'hao，实际 " + ic->committed);
+        // 自己按 ' 分开的也一样；输入框里没有一个 '
+        fresh(ic.get());
+        type(ic.get(), "xi'an");
+        check(client().toString() == "xi an" && preedit(ic.get()).empty(),
+              "手动分隔的 xi'an 在输入框里是 xi an：" + client().toString());
         fresh(ic.get());
     }
     ic->setCapabilityFlags(CapabilityFlags{});

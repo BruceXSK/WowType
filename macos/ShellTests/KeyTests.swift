@@ -7,7 +7,7 @@ func runKeyTests() {
     do {
         let (c, f) = session()
         type(c, "nihao")
-        check(f.markedText == "ni'hao", "nihao 编辑区分音节", f.markedText)
+        check(f.markedText == "ni hao", "nihao 编辑区分音节", f.markedText)
         check(f.caretInMarked == 6, "光标在编辑区末尾", "\(String(describing: f.caretInMarked))")
         check(f.markedAttributes[.underlineStyle] != nil, "编辑区带 IMK 的下划线", "\(f.markedAttributes)")
         check(texts.first == "你好", "候选框第一个是你好", "\(texts)")
@@ -67,7 +67,7 @@ func runKeyTests() {
         let (c, f) = session()
         type(c, "nihao")
         press(c, .backspace)
-        check(f.markedText == "ni'ha", "退格删一个字母", f.markedText)
+        check(f.markedText == "ni ha", "退格删一个字母", f.markedText)
         for _ in 0..<5 { press(c, .backspace) }
         check(f.markedText.isEmpty && panel == nil && f.text.isEmpty, "退格删光了收起", "「\(f.text)」")
         check(!press(c, .backspace), "没在打字时退格交给应用")
@@ -85,7 +85,7 @@ func runKeyTests() {
         tapShift(c)
         check(panel?.aux == "中", "回到中文：提示「中」", "\(String(describing: panel?.aux))")
         type(c, "nihao")
-        check(f.markedText == "ni'hao", "再按 Shift 回到中文", f.markedText)
+        check(f.markedText == "ni hao", "再按 Shift 回到中文", f.markedText)
         check(texts.first == "你好" && panel?.aux == nil, "接着打字：候选框换成候选，不再是提示")
         tapShift(c)
         check(f.text == "abcnihao" && f.markedText.isEmpty, "打到一半按 Shift：字母原样上屏", "\(f.text) 「\(f.markedText)」")
@@ -234,7 +234,7 @@ func runKeyTests() {
         let (c, f) = session(["ArrowKeys": "Caret"])
         type(c, "nihao")
         press(c, .left)
-        check(f.markedText == "ni'hao" && f.caretInMarked == 5, "← 光标左移一个字母（输入框里的光标跟着动）",
+        check(f.markedText == "ni hao" && f.caretInMarked == 5, "← 光标左移一个字母（输入框里的光标跟着动）",
               "「\(f.markedText)」 光标 \(String(describing: f.caretInMarked))")
         press(c, .left)
         press(c, .left)
@@ -255,7 +255,7 @@ func runKeyTests() {
         type(c, "nhao")
         for _ in 0..<3 { press(c, .left) }
         type(c, "i")
-        check(f.markedText == "ni'hao", "光标处插字母 n|hao + i → ni'hao", f.markedText)
+        check(f.markedText == "ni hao", "光标处插字母 n|hao + i → ni hao", f.markedText)
         check(texts.first == "你好", "插进去以后照常出你好", "\(texts.prefix(3))")
         press(c, .space)
         check(f.text == "你好", "空格上屏", f.text)
@@ -512,7 +512,7 @@ private func shuangpinTests() {
     do {
         let (c, f) = session(["InputScheme": "Shuangpin", "ShuangpinScheme": "Ziranma"])
         type(c, "nihk")
-        check(f.markedText == "ni'hao", "自然码 nihk 编辑区显示全拼", f.markedText)
+        check(f.markedText == "ni hao", "自然码 nihk 编辑区显示全拼", f.markedText)
         check(texts.first == "你好", "自然码 nihk → 你好", "\(texts.prefix(3))")
         press(c, .space)
         check(f.text == "你好", "双拼上屏", f.text)

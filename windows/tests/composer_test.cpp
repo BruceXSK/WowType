@@ -793,7 +793,7 @@ int main(int argc, char **argv) {
         auto [c, client] = fresh();
         type(*c, "nihao");
         check(c->isComposing(), "打 nihao 进编辑区");
-        check(client->marked == "ni'hao", "编辑区分音节", client->marked);
+        check(client->marked == "ni hao", "编辑区分音节", client->marked);
         check(client->markedCursor == static_cast<int>(client->marked.size()), "光标在编辑区末尾");
         check(!client->texts().empty() && client->texts()[0] == "你好", "第一个候选是你好", join(client->texts()));
         c->handle(KeyInput::character(' '));
