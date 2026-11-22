@@ -707,7 +707,8 @@ pub struct Session<'e> {
     reported_prev: Option<Option<char>>,
     /// 会话上屏那一下外壳报的光标前的字（#295）。有的应用（Electron 系）报周围文字慢好几拍，
     /// 上屏以后的键报来的还是上屏之前的那个字：只要还和它一样、又和会话自己记的上一个字不一样，
-    /// 就是应用还没跟上，用会话自己记的。报来的变了（跟上了，或者光标真的挪了）就照常信应用的。
+    /// 就是应用还没跟上，用会话自己记的。报来的变了（跟上了，或者光标真的挪了）就照常信应用的；
+    /// 报的是光标前没有字时不算（空输入框上屏以后又被应用清空）。
     commit_prev: Option<Option<char>>,
     /// 这次按键时外壳给的输入框情况（[`key_hints`]）。
     hints: u32,
@@ -913,10 +914,11 @@ impl<'e> Session<'e> {
         // 上屏以后报来的光标前的字还是上屏之前的那个、和会话自己记的上一个字对不上：应用报周围文字慢了
         // （Electron 系慢好几拍，#295：「1:1复刻」后面的句号被当成数字后面的，成了半角点），用会话自己记的。
         // 只认「和上屏前一模一样」：报来的是别的字就是光标真的挪了，照常信应用的。上屏以后把光标点回
-        // 原来那个字后面也会这样当，到下一次上屏为止
+        // 原来那个字后面也会这样当，到下一次上屏为止。光标前没有字的不算：空的输入框里上屏、
+        // 应用又把它清空了（聊天框点了发送）很常见，那时上文要作废
         let modifier_key = is_modifier_keysym(key.keysym);
         let reported = (key.hints & key_hints::SURROUNDING != 0).then_some(key.prev_char);
-        let lagging = self.commit_prev.is_some()
+        let lagging = key.prev_char.is_some()
             && self.commit_prev == reported
             && self.last_char.is_some_and(|own| Some(own) != key.prev_char);
         if !modifier_key {

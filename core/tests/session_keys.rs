@@ -4353,15 +4353,21 @@ fn moved_cursor_is_not_taken_for_lagging_surrounding() {
 
 #[test]
 fn lagging_surrounding_keeps_context_and_mouse_choice() {
-    // 上文也一样：应用还报着上屏前的样子（光标前没有字）时，不把会话记的上文清掉
+    // 上文也一样：应用还报着上屏前的那个字时，不把会话记的上文换掉
     let mut session = with(context_engine());
-    type_with_prev(&mut session, "bu<sp>", None);
-    type_with_prev(&mut session, "ma", None);
+    type_with_prev(&mut session, "bu<sp>", Some('x'));
+    type_with_prev(&mut session, "ma", Some('x'));
     assert_eq!(texts(&mut session)[0], "骂", "应用没跟上，上文「不」留着");
-    type_with_prev(&mut session, "<esc>", None);
+    type_with_prev(&mut session, "<esc>", Some('x'));
     // 跟上了以后光标前真的是别的字：上文换成它
     type_with_prev(&mut session, "ma", Some('好'));
     assert_eq!(texts(&mut session)[0], "吗");
+
+    // 光标前没有字的不算：空输入框里上屏、应用又清空了（聊天框点了发送），上文作废
+    let mut session = with(context_engine());
+    type_with_prev(&mut session, "bu<sp>", None);
+    type_with_prev(&mut session, "ma", None);
+    assert_eq!(texts(&mut session)[0], "吗", "输入框清空了，不拿上一次上屏的「不」当上文");
 
     // 鼠标点候选上屏的也算（不经过按键）
     let mut session = with(engine());
