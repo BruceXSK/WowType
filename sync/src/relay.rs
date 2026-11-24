@@ -406,11 +406,13 @@ pub(crate) mod test_support {
         }
     }
 
+    fn harness() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../relay/cloudflare/test/harness.mjs")
+    }
+
     pub fn start(token: &str) -> Option<TestRelay> {
-        let harness = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../relay/cloudflare/test/harness.mjs");
         let mut child = Command::new("node")
-            .arg(harness)
+            .arg(harness())
             .args(["0", token])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -439,11 +441,12 @@ pub(crate) mod test_support {
                 .status()
                 .is_ok_and(|s| s.success())
         };
-        let both = ok("node") && ok("curl");
-        if !both {
-            eprintln!("skip：中转服务的测试要 node 和 curl");
+        // 发行版打包时只带了一部分源码目录：没有 Worker 的代码也跳过
+        let all = ok("node") && ok("curl") && harness().is_file();
+        if !all {
+            eprintln!("skip：中转服务的测试要 node、curl 和 relay/cloudflare 的代码");
         }
-        both
+        all
     }
 }
 

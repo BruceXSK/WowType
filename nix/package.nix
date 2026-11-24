@@ -46,6 +46,7 @@ stdenv.mkDerivation {
       ../core
       ../voice
       ../voice-daemon
+      ../sync
       ../fcitx5-addon
       ../icons
       ../themes
