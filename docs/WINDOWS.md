@@ -119,6 +119,7 @@ DLL 装进每个应用的进程里，载入以后不会卸载：换 DLL 前先�
 | `custom.tsv` | 自定义词，格式同 Linux（[CONFIG.md](CONFIG.md#自定义词)） |
 | `emoji-recent.txt` | 最近用过的 emoji |
 | `translate.key` | 互译的 API Key（一行） |
+| `sync.json`、`sync-relay.key` | [跨设备复制粘贴](SYNC.md)的配对文件（设备编号、组密钥）和中转服务的访问口令 |
 | `wetype\nlrgpt2_nnlm.bin` | 导入的微信输入法整句增强模型（有就先用它） |
 | `models\Hy-MT3-1.8B-Q4_K_M.gguf`、`llama\llama-server.exe` | 本地翻译模型和 llama.cpp（`TranslateLlamaServer` 留空时先在 PATH 里找） |
 | `wtlocal\` | 语音识别模型（微信输入法的离线模型，不随安装包分发，自己放进来） |
@@ -147,6 +148,12 @@ Windows 程序（`b12110` 的 CPU 包，钉死 SHA256，解到 `llama\`；PATH �
 选哪个下面只出现哪个的设置：本地是模型文件、llama-server、下载按钮；哔哩哔哩是模型（Index-Translate-2B / 9B / 35B-A3B）
 和隐私说明；自定义是地址、API Key、模型。选中哪个从 `TranslateLocal` 和 `TranslateBaseUrl` 推出来，换引擎时写上这个引擎的
 地址和模型；自定义的地址、模型换到哔哩哔哩再换回来照原样写回（只记在这次打开的窗口里），`translate.key` 不动，也不发给哔哩哔哩。
+「跨设备」页是[跨设备复制粘贴](SYNC.md)：开关、局域网直连、中转服务地址、设备名，下面是配对（显示配对码 / 输入配对码 / 取消配对）、
+中转服务的访问口令和测试。输入法是加载进每个应用进程的 DLL，不能每个进程各起一份同步，所以收发在一个后台进程里：
+`wowtype-settings.exe --sync-agent`（一个不显示的窗口，同一时间只有一个）。保存时开关开着就起它，并在
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 里登记登录时自启；关掉以后它下一秒自己退，自启也去掉；卸载时停掉。
+它听剪贴板变化（`AddClipboardFormatListener`），密码管理器标了 `ExcludeClipboardContentFromMonitorProcessing`、
+`CanIncludeInClipboardHistory=0`、`CanUploadToCloudClipboard=0` 的不读；别的设备复制过来的放进系统剪贴板。
 规则在 `windows/src/common/translate_engine.*`。哔哩哔哩和自定义下面有「测试连接」：用核心的翻译器（和输入法同一套请求，
 系统的 `curl.exe`）译一次「你好」，显示译文和用了几秒；自定义的 Key 没保存时用框里的。
 下载（模型、新版安装程序）断了从断的地方接着下：没下完的先存成 `.part`，一次下载里断了自动接几次，还不行就留着，
