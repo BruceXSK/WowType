@@ -129,6 +129,14 @@ STATE_FILE = os.path.join(STATE_DIR, "state.json")
 # 互译用的 API Key 单独存一个只有自己能读的文件（wowtype.conf 别的程序也能读），插件每次请求时现读
 TRANSLATE_KEY_FILE = os.environ.get("WOWTYPE_TRANSLATE_KEY_FILE") or os.path.join(
     _xdg("XDG_CONFIG_HOME", "~/.config"), "wowtype", "translate.key")
+# 跨设备复制粘贴：配对文件（设备编号、组密钥、配过对的设备）和中转服务的访问口令，都只有自己能读。
+# 配对由 wowtype-sync 命令行做（和插件用的是同一份代码），插件盯着配对文件、变了自己跟上
+SYNC_STATE_FILE = os.environ.get("WOWTYPE_SYNC_STATE_FILE") or os.path.join(
+    _xdg("XDG_CONFIG_HOME", "~/.config"), "wowtype", "sync.json")
+SYNC_RELAY_KEY_FILE = os.environ.get("WOWTYPE_SYNC_RELAY_KEY_FILE") or os.path.join(
+    _xdg("XDG_CONFIG_HOME", "~/.config"), "wowtype", "sync-relay.key")
+SYNC_RELAY_GUIDE = f"{HOMEPAGE}/tree/main/relay/cloudflare"
+SYNC_PORT = 39217
 ISSUES_URL = f"{HOMEPAGE}/issues/new"
 # 界面上的中文标点要用简体中文字体画，见 SettingsApp.update_font_css；装了哪个用哪个
 CJK_SC_FONTS = ["Noto Sans CJK SC", "Source Han Sans SC", "Source Han Sans CN",
@@ -369,6 +377,11 @@ DEFAULTS = {
     "Calculator": "True",
     "Toolbar": "True",
     "ClipboardHistory": "False",
+    "ClipboardSync": "False",
+    "ClipboardSyncLan": "True",
+    "ClipboardSyncRelayUrl": "",
+    "ClipboardSyncDeviceName": "",
+    "ClipboardSyncPaste": "True",
     "AutoSpace": "False",
     "AutoSpaceLetters": "True",
     "AutoSpaceDigits": "True",
@@ -3427,6 +3440,87 @@ CHECK_TOOL = shutil.which("wowtype-check") or os.path.join(os.path.dirname(os.pa
                                                            "wowtype-check")
 
 
+# 跨设备复制粘贴的配对工具（核心的一部分）。老的安装包、不带同步编的核心里没有它
+def sync_tool():
+    return os.environ.get("WOWTYPE_SYNC_BIN") or shutil.which("wowtype-sync") or next(
+        (path for path in (
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "wowtype-sync"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "release",
+                         "wowtype-sync"),
+        ) if os.access(path, os.X_OK)), None)
+
+
+def sync_devices(path=None):
+    """配对文件里记着的：（配没配对, 一起配过对的设备的名字）。不读、不显示组密钥。"""
+    try:
+        with open(path or SYNC_STATE_FILE, encoding="utf-8") as f:
+            state = json.load(f)
+        names = [str(d.get("name") or "没起名字的设备") for d in state.get("devices", [])]
+        return bool(state.get("group_key")), names
+    except (OSError, ValueError, AttributeError):
+        return False, []
+
+
+def sync_command(command, values, *more):
+    """wowtype-sync 的命令行：照设置带上配对文件、设备名、局域网开没开、中转服务。口令只给文件名。"""
+    args = [sync_tool(), command, *more, "--state", SYNC_STATE_FILE,
+            "--name", values.get("ClipboardSyncDeviceName", "").strip() or os.uname().nodename]
+    if values.get("ClipboardSyncLan", "True") != "True":
+        args.append("--no-lan")
+    relay = values.get("ClipboardSyncRelayUrl", "").strip()
+    if relay:
+        args += ["--relay", relay, "--relay-key-file", SYNC_RELAY_KEY_FILE]
+    return args
+
+
+def sync_result(output):
+    """wowtype-sync 最后一行：paired 名字 / ok → (True, 名字)；error 说明 → (False, 说明)。"""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    last = lines[-1] if lines else ""
+    word, _, rest = last.partition(" ")
+    if word in ("paired", "ok"):
+        return True, rest
+    return False, rest if word == "error" and rest else "配对工具没有回话"
+
+
+def sync_self_test():
+    """配对文件、命令行参数、结果的解析。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "sync.json")
+        assert sync_devices(path) == (False, [])
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("坏了")
+        assert sync_devices(path) == (False, [])
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"device_id": "00", "group_key": None, "devices": []}, f)
+        assert sync_devices(path) == (False, [])
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"group_key": "abc", "devices": [{"id": "1", "name": "书房"}, {"id": "2"}]}, f)
+        assert sync_devices(path) == (True, ["书房", "没起名字的设备"])
+    assert sync_result("code 123456 300\npaired 书房 的电脑\n") == (True, "书房 的电脑")
+    assert sync_result("ok\n") == (True, "")
+    assert sync_result("error 配对码不对\n") == (False, "配对码不对")
+    assert sync_result("") == (False, "配对工具没有回话")
+    global sync_tool
+    real = sync_tool
+    sync_tool = lambda: "wowtype-sync"  # noqa: E731
+    try:
+        args = sync_command("pair-join", {"ClipboardSyncDeviceName": " 客厅 "}, "123456")
+        assert args[:3] == ["wowtype-sync", "pair-join", "123456"] and args[-2:] == ["--name", "客厅"]
+        assert "--no-lan" not in args and "--relay" not in args
+        args = sync_command("pair-host", {"ClipboardSyncLan": "False",
+                                          "ClipboardSyncRelayUrl": " https://r.example.workers.dev "})
+        assert "--no-lan" in args
+        assert args[-4:] == ["--relay", "https://r.example.workers.dev",
+                             "--relay-key-file", SYNC_RELAY_KEY_FILE]
+        # 访问口令不出现在命令行里
+        assert args[args.index("--name") + 1] == os.uname().nodename
+    finally:
+        sync_tool = real
+    print("sync self-test ok")
+
+
 def check_nnlm_file(path):
     """用核心的读取代码试着解析模型：读得出来返回字表大小，读不出来抛 ValueError。"""
     if not os.access(CHECK_TOOL, os.X_OK):
@@ -6414,8 +6508,248 @@ class SettingsWindow(Adw.ApplicationWindow):
         auto_space.add_row(self.make_switch("AutoSpaceDigits", "汉字和数字之间", None))
         extras.add(auto_space)
         page.add(extras)
+        page.add(self.build_sync())
         self.show_scheme(self.values["InputScheme"])
         return page
+
+    # ---------------- 跨设备复制粘贴
+
+    def build_sync(self):
+        group = Adw.PreferencesGroup(title="跨设备复制粘贴")
+        group.set_header_suffix(self.info_button(
+            "一台电脑上复制的文字，在另一台装了 WowType 的电脑上直接粘贴：按 Ctrl+V，"
+            "或者打 v 再按空格，在「剪贴板」里选。只传文字（最多 16 KB），不传图片和文件。\n\n"
+            "没有账号，也不经过 WowType 的服务器。两台设备用 6 位配对码配一次对，之后的内容都在设备上加密，"
+            "只有配过对的设备解得开。\n\n"
+            "同一个局域网里设备之间直接传"
+            f"（防火墙要放行 {SYNC_PORT} 端口的 UDP 和 TCP）。"
+            "不在同一个局域网时，可以自己部署一个中转服务（Cloudflare Worker，免费套餐够用），"
+            "它只看得到密文。\n\n"
+            "注意：从密码管理器复制的密码也会被传过去，输入法分不出哪条是密码。",
+            [("怎么部署中转服务", SYNC_RELAY_GUIDE)]))
+        self.sync_switch = self.make_switch("ClipboardSync", "跨设备复制粘贴", None)
+        self.sync_switch.connect("notify::active", lambda *_a: self.refresh_sync())
+        group.add(self.sync_switch)
+
+        self.sync_pair_row = Adw.ActionRow(title="配对")
+        self.sync_host_button = Gtk.Button(label="显示配对码", valign=Gtk.Align.CENTER)
+        self.sync_host_button.connect("clicked", self.on_sync_host)
+        self.sync_pair_row.add_suffix(self.sync_host_button)
+        self.sync_unpair_button = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
+                                             tooltip_text="取消配对（这台设备不再收发）")
+        self.sync_unpair_button.add_css_class("flat")
+        self.sync_unpair_button.connect("clicked", self.on_sync_unpair)
+        self.sync_pair_row.add_suffix(self.sync_unpair_button)
+        group.add(self.sync_pair_row)
+
+        self.sync_code_row = EntryRow(title="输入另一台设备上显示的配对码", show_apply_button=False)
+        self.sync_code_row.set_input_purpose(Gtk.InputPurpose.DIGITS)
+        self.sync_code_row.connect("entry-activated", self.on_sync_join)
+        self.sync_join_button = Gtk.Button(label="配对", valign=Gtk.Align.CENTER)
+        self.sync_join_button.connect("clicked", lambda _b: self.on_sync_join(self.sync_code_row))
+        self.sync_code_row.add_suffix(self.sync_join_button)
+        group.add(self.sync_code_row)
+
+        more = Adw.ExpanderRow(title="更多选项")
+        more.add_row(self.make_switch("ClipboardSyncLan", "同一个局域网里直接传", None))
+        self.sync_relay_row = EntryRow(title="中转服务地址（https://…，不用就留空）",
+                                       show_apply_button=False)
+        self.sync_relay_row.set_text(self.values["ClipboardSyncRelayUrl"])
+        self.sync_relay_row.connect("changed", lambda row: self.set_value(
+            "ClipboardSyncRelayUrl", row.get_text().strip()))
+        more.add_row(self.sync_relay_row)
+        self.sync_token_row = PasswordEntryRow(title="中转服务的访问口令")
+        self.sync_token_row.set_text(read_translate_key(SYNC_RELAY_KEY_FILE))
+        self.sync_token_row.connect("changed", self.on_sync_token_changed)
+        more.add_row(self.sync_token_row)
+        self.sync_ping_row = Adw.ActionRow(title="测试中转服务")
+        self.sync_ping_button = Gtk.Button(label="测试", valign=Gtk.Align.CENTER)
+        self.sync_ping_button.connect("clicked", self.on_sync_ping)
+        self.sync_ping_row.add_suffix(self.sync_ping_button)
+        more.add_row(self.sync_ping_row)
+        name = EntryRow(title=f"这台设备的名字（留空是 {os.uname().nodename}）", show_apply_button=False)
+        name.set_text(self.values["ClipboardSyncDeviceName"])
+        name.connect("changed", lambda row: self.set_value(
+            "ClipboardSyncDeviceName", row.get_text().strip()))
+        more.add_row(name)
+        more.add_row(self.make_switch("ClipboardSyncPaste", "收到的放进系统剪贴板",
+                                      "关掉以后只出现在 v + 空格的「剪贴板」里"))
+        group.add(more)
+        self.sync_more = more
+        self.sync_host = None       # 正在显示配对码时的 wowtype-sync 进程
+        self.sync_busy = False      # 正在加入 / 测试
+        self.sync_token_source = 0
+        self.refresh_sync()
+        return group
+
+    def refresh_sync(self, note=None):
+        """照现在的状态改「配对」那一行。note：正在显示的配对码之类，盖过平常的说明。"""
+        if not hasattr(self, "sync_pair_row"):
+            return
+        tool = sync_tool()
+        paired, names = sync_devices()
+        hosting = self.sync_host is not None
+        if note:
+            text = note
+        elif not tool:
+            text = "这个安装包里没有配对工具（wowtype-sync），更新 WowType 以后再试"
+        elif paired and names:
+            text = "已经和 " + "、".join(names) + " 配对"
+        elif paired:
+            text = "已经配对"
+        else:
+            text = "还没有配对：在一台设备上显示配对码，在另一台上输入"
+        self.sync_pair_row.set_subtitle(GLib.markup_escape_text(text))
+        self.sync_host_button.set_label("取消" if hosting else "显示配对码")
+        self.sync_host_button.set_sensitive(bool(tool) and not self.sync_busy)
+        self.sync_unpair_button.set_visible(paired and not hosting)
+        self.sync_code_row.set_sensitive(bool(tool) and not hosting and not self.sync_busy)
+        self.sync_ping_button.set_sensitive(bool(tool) and not self.sync_busy)
+
+    def on_sync_token_changed(self, _row):
+        if self.sync_token_source:
+            GLib.source_remove(self.sync_token_source)
+        self.sync_token_source = GLib.timeout_add(400, self.save_sync_token)
+
+    def save_sync_token(self):
+        self.sync_token_source = 0
+        try:
+            write_translate_key(self.sync_token_row.get_text(), SYNC_RELAY_KEY_FILE)
+        except OSError as e:
+            self.toast(f"访问口令保存失败：{e.strerror}")
+        else:
+            # 插件每次重新配置时读口令文件
+            self.fcitx.reload()
+        return GLib.SOURCE_REMOVE
+
+    def sync_flush(self):
+        """跑 wowtype-sync 之前：没存的访问口令先存上（它从文件里读）。"""
+        if self.sync_token_source:
+            GLib.source_remove(self.sync_token_source)
+            self.save_sync_token()
+
+    def on_sync_host(self, _button):
+        """「显示配对码」：起 wowtype-sync pair-host，它先打一行配对码，配上了再打一行结果。"""
+        if self.sync_host is not None:
+            # 「取消」：结束进程，读输出的线程会收尾
+            self.sync_host.terminate()
+            return
+        self.sync_flush()
+        try:
+            process = subprocess.Popen(sync_command("pair-host", self.values), stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+        except OSError as e:
+            self.toast(f"配对工具起不来：{e.strerror}")
+            return
+        self.sync_host = process
+        self.refresh_sync("正在准备配对码…")
+        log("跨设备复制粘贴：开始配对（显示配对码）")
+
+        def work():
+            output = []
+            for line in process.stdout:
+                output.append(line)
+                word, _, rest = line.strip().partition(" ")
+                if word == "code":
+                    code = rest.split()[0]
+                    GLib.idle_add(self.refresh_sync,
+                                  f"配对码 {code[:3]} {code[3:]}：在另一台设备的 WowType 设置里输入，5 分钟内有效")
+            process.wait()
+            GLib.idle_add(self.sync_host_done, process, "".join(output))
+        threading.Thread(target=work, daemon=True).start()
+
+    def sync_host_done(self, process, output):
+        if self.sync_host is process:
+            self.sync_host = None
+        ok, text = sync_result(output)
+        if ok:
+            log("跨设备复制粘贴：配对成功")
+            self.toast(f"已经和 {text} 配对")
+            self.fcitx.reload()
+        elif process.returncode is not None and process.returncode < 0:
+            log("跨设备复制粘贴：取消了配对")
+        else:
+            log(f"跨设备复制粘贴：没配上：{text}")
+            self.toast(text)
+        self.refresh_sync()
+
+    def sync_run(self, args, done):
+        """后台跑一条 wowtype-sync，跑完在主线程调 done(成没成, 说明)。"""
+        self.sync_flush()
+        self.sync_busy = True
+        self.refresh_sync()
+
+        def work():
+            try:
+                result = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
+                                        timeout=90)
+                outcome = sync_result(result.stdout)
+            except subprocess.TimeoutExpired:
+                outcome = (False, "等太久了，没有结果")
+            except OSError as e:
+                outcome = (False, f"配对工具起不来：{e.strerror}")
+
+            def finish():
+                self.sync_busy = False
+                done(*outcome)
+                self.refresh_sync()
+            GLib.idle_add(finish)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_sync_join(self, row):
+        code = "".join(ch for ch in row.get_text() if not ch.isspace() and ch != "-")
+        if not (len(code) == 6 and code.isascii() and code.isdigit()):
+            self.toast("配对码是 6 位数字")
+            return
+        self.refresh_sync("正在找另一台设备…")
+
+        def done(ok, text):
+            if ok:
+                log("跨设备复制粘贴：配对成功（输入配对码）")
+                row.set_text("")
+                self.toast(f"已经和 {text} 配对")
+                self.fcitx.reload()
+            else:
+                log(f"跨设备复制粘贴：没配上：{text}")
+                self.toast(text)
+        self.sync_run(sync_command("pair-join", self.values, code), done)
+
+    def on_sync_unpair(self, _button):
+        dialog = AlertDialog(
+            heading="取消配对？",
+            body="这台设备不再收到别的设备复制的内容，也不再把这里复制的发出去。"
+                 "别的设备之间不受影响；以后想恢复，重新配一次对就行。")
+        dialog.add_response("cancel", "不取消")
+        dialog.add_response("unpair", "取消配对")
+        dialog.set_response_appearance("unpair", ResponseAppearance.DESTRUCTIVE)
+
+        def answered(_dialog, response):
+            if response != "unpair":
+                return
+
+            def done(ok, text):
+                if ok:
+                    log("跨设备复制粘贴：取消了配对")
+                    self.toast("已取消配对")
+                    self.fcitx.reload()
+                else:
+                    self.toast(text)
+            self.sync_run([sync_tool(), "unpair", "--state", SYNC_STATE_FILE], done)
+        dialog.connect("response", answered)
+        dialog.present(self)
+
+    def on_sync_ping(self, _button):
+        relay = self.sync_relay_row.get_text().strip()
+        if not relay:
+            self.toast("先填中转服务的地址")
+            return
+        self.sync_ping_row.set_subtitle("正在连接…")
+
+        def done(ok, text):
+            self.sync_ping_row.set_subtitle(GLib.markup_escape_text(
+                "连得上，访问口令也对" if ok else text))
+        self.sync_run([sync_tool(), "ping", "--relay", relay,
+                       "--relay-key-file", SYNC_RELAY_KEY_FILE], done)
 
     def show_scheme(self, scheme):
         """双拼、五笔各自的设置只在选了它时显示；双拼、五笔时 v 是字母键：计算器换成大写 V，
@@ -8294,6 +8628,7 @@ if __name__ == "__main__":
         setup_self_test()
         lexicon_update_self_test()
         voice_model_self_test()
+        sync_self_test()
         lexicon_self_test()
         stale_copy_self_test()
         stats_self_test()

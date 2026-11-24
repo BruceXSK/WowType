@@ -268,6 +268,19 @@ FCITX_CONFIGURATION(
     // 默认关：fcitx5 的 clipboard 插件不告诉我们哪条是密码管理器复制的密码
     fcitx::Option<bool> clipboardHistory{this, "ClipboardHistory",
                                          "记录剪贴板历史（只在内存里，最多 20 条）", false};
+    // 跨设备复制粘贴：一台设备上复制的文字，在配过对的另一台上直接粘贴。默认关（和剪贴板历史一样，
+    // clipboard 插件不告诉我们哪条是密码管理器复制的密码）；配对在 WowType 设置里做
+    fcitx::Option<bool> clipboardSync{this, "ClipboardSync",
+                                      "跨设备复制粘贴（先在 WowType 设置里配对）", false};
+    fcitx::Option<bool> clipboardSyncLan{this, "ClipboardSyncLan",
+                                         "跨设备复制粘贴：同一个局域网里直接传", true};
+    fcitx::Option<std::string> clipboardSyncRelayUrl{
+        this, "ClipboardSyncRelayUrl", "跨设备复制粘贴：自己部署的中转服务地址（留空不用）", ""};
+    fcitx::Option<std::string> clipboardSyncDeviceName{
+        this, "ClipboardSyncDeviceName", "跨设备复制粘贴：这台设备的名字（留空用主机名）", ""};
+    fcitx::Option<bool> clipboardSyncPaste{
+        this, "ClipboardSyncPaste",
+        "跨设备复制粘贴：收到的也放进系统剪贴板（能直接 Ctrl+V）", true};
     fcitx::Option<bool> autoSpace{this, "AutoSpace", "汉字和英文、数字之间自动加空格", false};
     fcitx::Option<bool> autoSpaceLetters{this, "AutoSpaceLetters", "汉字和英文字母之间", true};
     fcitx::Option<bool> autoSpaceDigits{this, "AutoSpaceDigits", "汉字和数字之间", true};
@@ -553,6 +566,18 @@ private:
     void fillToolPanel(fcitx::InputContext *ic, WowtypeState *state);
     /// 剪贴板历史：从 fcitx5 的 clipboard 插件拿最新一条交给核心（没有这个插件就什么都不做）。
     void sampleClipboard(fcitx::InputContext *ic);
+    /// fcitx5 的 clipboard 插件里最新的一条；密码框里、没有这个插件时是空串。
+    std::string latestClipboard(fcitx::InputContext *ic);
+
+    // 跨设备复制粘贴
+    /// 配对文件（设备编号、组密钥），WowType 设置配对时写。
+    std::string syncStateFile() const;
+    /// 放中转服务访问口令的文件。
+    std::string syncRelayKeyFile() const;
+    /// 照设置起停同步（applyConfig 里调）。
+    void applySync();
+    /// 每秒一次：把本机剪贴板交给核心，取别的设备复制过来的。
+    void tickSync();
 
 public:
 
@@ -674,6 +699,12 @@ private:
     bool calculator_ = true;
     bool toolbar_ = true;
     bool clipboardHistory_ = false;
+    /// 跨设备复制粘贴（核心没带 sync 特性时一直是 nullptr）
+    WowtypeSync *sync_ = nullptr;
+    bool syncEnabled_ = false;
+    /// 收到的也放进系统剪贴板
+    bool syncPaste_ = true;
+    std::unique_ptr<fcitx::EventSourceTime> syncTimer_;
     /// 双拼时编辑区显示打的键（#122）
     bool shuangpinShowKeys_ = false;
     /// 双拼的简拼：每个键都是声母时也当简拼（sm -> 什么，#268）

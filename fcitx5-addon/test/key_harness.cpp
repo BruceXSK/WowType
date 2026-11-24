@@ -63,6 +63,13 @@ private:
 
 Clipboard *fakeClipboard = nullptr;
 
+/// 用系统装的 clipboard 插件（WOWTYPE_HARNESS_REAL_CLIPBOARD=1）。addon-test.sh 没给时传的是空串，
+/// 空串也算没给——以前只看有没有这个变量，假剪贴板那些用例一直没跑到。
+bool realClipboard() {
+    const char *value = std::getenv("WOWTYPE_HARNESS_REAL_CLIPBOARD");
+    return value && *value;
+}
+
 class FakeClipboardFactory final : public AddonFactory {
 public:
     AddonInstance *create(AddonManager * /*manager*/) override {
@@ -1495,7 +1502,7 @@ void runCases(Instance &instance) {
           "常用语按文件顺序：" + join(page(ic.get())));
     type(ic.get(), "2");
     check(ic->committed == "我的邮箱" && page(ic.get()).empty(), "数字键选常用语：" + ic->committed);
-    if (std::getenv("WOWTYPE_HARNESS_REAL_CLIPBOARD")) {
+    if (realClipboard()) {
         // 系统装的 clipboard 插件（没有显示器，历史是空的）：只确认调用它不出错
         fresh(ic.get());
         type(ic.get(), "v<sp>1");
@@ -3463,6 +3470,129 @@ void runVoiceCase(Instance &instance, std::function<void()> done) {
         });
 }
 
+/// 跨设备复制粘贴：这里的输入法是一台设备，addon-test.sh 用 `wowtype-sync listen` 起了另一台
+/// （同一组，收到什么写进 WOWTYPE_HARNESS_SYNC_PEER_OUT），第三台用 `wowtype-sync send` 往这边送。
+/// 每格 0.1 秒，靠事件循环里的定时器推进（输入法每秒采一次剪贴板）。
+struct SyncCase {
+    Instance &instance;
+    std::unique_ptr<HarnessInputContext> ic;
+    std::unique_ptr<EventSourceTime> timer;
+    std::string peerOut;
+    std::string sendCommand;
+    int stage = 0;
+    int ticks = 0;
+};
+
+std::string readFile(const std::string &path) {
+    std::ifstream in(path);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+void runSyncCase(Instance &instance, std::function<void()> done) {
+    const char *peerOut = std::getenv("WOWTYPE_HARNESS_SYNC_PEER_OUT");
+    const char *sendCommand = std::getenv("WOWTYPE_HARNESS_SYNC_SEND");
+    if (!peerOut || !*peerOut || !sendCommand || !*sendCommand || !fakeClipboard) {
+        std::printf("skip 跨设备复制粘贴（addon-test.sh 没起另一台设备：out=%d send=%d 假剪贴板=%d）\n",
+                    peerOut && *peerOut, sendCommand && *sendCommand, fakeClipboard != nullptr);
+        done();
+        return;
+    }
+    auto *c = new SyncCase{instance, std::make_unique<HarnessInputContext>(instance.inputContextManager()),
+                           {}, peerOut, sendCommand};
+    const std::string confDir = std::string(std::getenv("XDG_CONFIG_HOME")) + "/fcitx5/conf";
+    std::filesystem::create_directories(confDir);
+    auto *addon = instance.addonManager().addon("wowtype");
+    // 打开同步以前剪贴板里就有东西：不该发出去
+    setClipboard("打开同步以前就在剪贴板里的");
+    // 收到的不往系统剪贴板放（测试里没有、也不该碰真的剪贴板）
+    std::ofstream(confDir + "/wowtype.conf") << "ClipboardSync=True\nClipboardSyncPaste=False\n";
+    addon->reloadConfig();
+    c->ic->focusIn();
+    instance.setCurrentInputMethod(c->ic.get(), "wowtype", true);
+    c->timer = instance.eventLoop().addTimeEvent(
+        CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + 100000, 0,
+        [c, done, addon, confDir](EventSourceTime *source, uint64_t) {
+            ++c->ticks;
+            const std::string received = readFile(c->peerOut);
+            bool finished = false;
+            switch (c->stage) {
+            case 0:
+                // 等两边互相发现、输入法采到基准（每秒采一次）
+                if (c->ticks >= 30) {
+                    check(received.find("recv ") == std::string::npos,
+                          "跨设备：打开同步时剪贴板里原有的不发：" + received);
+                    setClipboard("从这台复制的\n第二行");
+                    c->stage = 1;
+                    c->ticks = 0;
+                }
+                break;
+            case 1:
+                if (received.find("从这台复制的\\n第二行") != std::string::npos || c->ticks > 150) {
+                    check(received.find("\t从这台复制的\\n第二行\n") != std::string::npos,
+                          "跨设备：这台复制的到了另一台：" + received);
+                    check(received.find("原有的") == std::string::npos, "跨设备：原有的一直没发");
+                    check(std::system(c->sendCommand.c_str()) == 0, "跨设备：第三台送得进来");
+                    c->stage = 2;
+                    c->ticks = 0;
+                }
+                break;
+            case 2: {
+                // 另一台复制的：在工具栏的「剪贴板」里（没开剪贴板历史，所以只有收到的这一条）
+                fresh(c->ic.get());
+                type(c->ic.get(), "v<sp>1");
+                const auto items = page(c->ic.get());
+                if (!items.empty() || c->ticks > 150) {
+                    check(items.size() == 1 && items[0] == "第三台复制的\u23CE换行",
+                          "跨设备：别的设备复制的出现在剪贴板里：" + join(items));
+                    type(c->ic.get(), "<cr>");
+                    check(c->ic->committed == "第三台复制的\n换行",
+                          "跨设备：选它上屏，换行原样：" + c->ic->committed);
+                    // 收到的被放进系统剪贴板、又当成本机复制的采回来：不往回发
+                    setClipboard("第三台复制的\n换行");
+                    c->stage = 3;
+                    c->ticks = 0;
+                } else {
+                    type(c->ic.get(), "<esc>");
+                }
+                break;
+            }
+            case 3:
+                if (c->ticks >= 25) {
+                    check(received.find("第三台复制的") == std::string::npos,
+                          "跨设备：别的设备传来的不往回发：" + received);
+                    // 关掉以后复制的不发
+                    std::ofstream(confDir + "/wowtype.conf") << "";
+                    addon->reloadConfig();
+                    setClipboard("关掉以后复制的");
+                    c->stage = 4;
+                    c->ticks = 0;
+                }
+                break;
+            default:
+                if (c->ticks >= 25) {
+                    check(received.find("关掉以后复制的") == std::string::npos,
+                          "跨设备：关掉以后不发：" + received);
+                    fresh(c->ic.get());
+                    type(c->ic.get(), "v<sp>1");
+                    check(page(c->ic.get()).empty(), "跨设备：关掉以后收到的也清掉：" + join(page(c->ic.get())));
+                    type(c->ic.get(), "<esc>");
+                    finished = true;
+                }
+                break;
+            }
+            if (!finished) {
+                source->setNextInterval(100000);
+                source->setOneShot();
+                return true;
+            }
+            setClipboard("");
+            c->ic.reset();
+            done();
+            dispatcher->schedule([c]() { delete c; });
+            return true;
+        });
+}
+
 /// 语音取消：按时间表（每格 0.1 秒）发按键、失焦，最后检查没有东西上屏。
 /// 识别是异步的，取消之后还要再等几秒，确认迟到的结果被丢掉、不会上屏。
 struct VoiceScript {
@@ -4233,7 +4363,7 @@ int main(int argc, char **argv) {
     FakeClipboardFactory clipboardFactory;
     StaticAddonRegistry registry{{"clipboard", &clipboardFactory}};
     instance.addonManager().registerDefaultLoader(
-        std::getenv("WOWTYPE_HARNESS_REAL_CLIPBOARD") ? nullptr : &registry);
+        realClipboard() ? nullptr : &registry);
     EventDispatcher mainDispatcher;
     mainDispatcher.attach(&instance.eventLoop());
     dispatcher = &mainDispatcher;
@@ -4248,8 +4378,10 @@ int main(int argc, char **argv) {
             runGridOverlayCase(instance, [&instance]() {
                 runVoiceCase(instance, [&instance]() {
                     runVoiceCancelCases(instance, [&instance]() {
+                    runSyncCase(instance, [&instance]() {
                         std::printf(failures ? "KEY HARNESS FAILED (%d)\n" : "KEY HARNESS OK\n", failures);
                         instance.exit();
+                    });
                     });
                 });
             });

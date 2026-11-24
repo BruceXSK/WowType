@@ -20,6 +20,8 @@
 #include <thread>
 #include <utility>
 
+#include <unistd.h>
+
 #include <fcitx-config/iniparser.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
@@ -1432,9 +1434,13 @@ void WowtypeEngine::applyConfig() {
     clipboardHistory_ = envOr("WOWTYPE_CLIPBOARD_HISTORY", *config_.clipboardHistory);
     shuangpinShowKeys_ = *config_.shuangpinShowKeys;
     shuangpinAbbrev_ = envOr("WOWTYPE_SHUANGPIN_ABBREV", *config_.shuangpinAbbrev);
-    if (!clipboardHistory_) {
+    syncEnabled_ = envOr("WOWTYPE_CLIPBOARD_SYNC", *config_.clipboardSync);
+    syncPaste_ = *config_.clipboardSyncPaste;
+    // 别的设备复制过来的也放在剪贴板历史里：同步开着时不清
+    if (!clipboardHistory_ && !syncEnabled_) {
         wowtype_clipboard_clear();
     }
+    applySync();
     autoSpaceFlags_ = *config_.autoSpace ? (*config_.autoSpaceLetters ? 1 : 0) |
                                                (*config_.autoSpaceDigits ? 2 : 0)
                                          : 0;
@@ -1562,7 +1568,8 @@ void WowtypeEngine::applyConfig() {
              << " 中英键=" << toggleKey_.toString() << " 互译键=" << translateModeKey_.toString()
              << " 选词键=" << static_cast<int>(selectKeys_) << " 日期时间=" << dateTime_
              << " 计算器=" << calculator_ << " 工具栏=" << toolbar_
-             << " 剪贴板历史=" << clipboardHistory_ << " 互译=" << translateEnabled_ << "("
+             << " 剪贴板历史=" << clipboardHistory_ << " 跨设备粘贴=" << syncEnabled_
+             << " 互译=" << translateEnabled_ << "("
              << (translateAvailable() ? translateModel + " → " + translateTarget : "未配置")
              << ")"
              << " 检查更新=" << *config_.checkUpdate << " 打字统计=" << typingStats_;
@@ -1716,6 +1723,11 @@ WowtypeEngine::~WowtypeEngine() {
         wowtype_translate_free(translator_);
         translator_ = nullptr;
     }
+    syncTimer_.reset();
+    if (sync_) {
+        wowtype_sync_free(sync_);
+        sync_ = nullptr;
+    }
 }
 
 void WowtypeEngine::takeLoaded() {
@@ -1862,7 +1874,8 @@ void WowtypeEngine::syncSession(WowtypeState *state) {
     // 定时器（tickTranslate）的 frame 里，都跟着 mode_changed
     config.translate_one_shot = *config_.translateOneShot ? 1 : 0;
     config.toolbar = toolbar_ ? 1 : 0;
-    config.clipboard_history = clipboardHistory_ ? 1 : 0;
+    // 同步开着时工具栏的「剪贴板」也要能选别的设备复制过来的
+    config.clipboard_history = (clipboardHistory_ || syncEnabled_) ? 1 : 0;
     config.shuangpin_keys = shuangpinShowKeys_ ? 1 : 0;
     config.wubi = wubi_ ? 1 : 0;
     config.wubi_auto_commit = *config_.wubiAutoCommit ? 1 : 0;
@@ -2209,21 +2222,110 @@ std::string WowtypeEngine::recentEmojiPath() const {
     return dir.empty() ? std::string() : dir + "/emoji-recent.txt";
 }
 
-void WowtypeEngine::sampleClipboard(fcitx::InputContext *ic) {
-    if (!clipboardHistory_ || !ic) {
-        return;
-    }
-    // 密码框里不记（clipboard 插件自己也不记标成密码的内容）
-    if (ic->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive)) {
-        return;
+std::string WowtypeEngine::latestClipboard(fcitx::InputContext *ic) {
+    // 密码框里不读（clipboard 插件自己也不记标成密码的内容）
+    if (!ic || ic->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive)) {
+        return {};
     }
     auto *addon = instance_->addonManager().addon("clipboard");
     if (!addon) {
+        return {};
+    }
+    return addon->call<fcitx::IClipboard::clipboard>(ic);
+}
+
+void WowtypeEngine::sampleClipboard(fcitx::InputContext *ic) {
+    if (!clipboardHistory_) {
         return;
     }
-    const std::string text = addon->call<fcitx::IClipboard::clipboard>(ic);
+    const std::string text = latestClipboard(ic);
     if (!text.empty()) {
         wowtype_clipboard_remember(text.c_str());
+    }
+}
+
+std::string WowtypeEngine::syncStateFile() const {
+    if (const char *env = std::getenv("WOWTYPE_SYNC_STATE_FILE"); env && *env) {
+        return env;
+    }
+    const std::string dir = userConfigDir();
+    return dir.empty() ? std::string() : dir + "/sync.json";
+}
+
+std::string WowtypeEngine::syncRelayKeyFile() const {
+    if (const char *env = std::getenv("WOWTYPE_SYNC_RELAY_KEY_FILE"); env && *env) {
+        return env;
+    }
+    const std::string dir = userConfigDir();
+    return dir.empty() ? std::string() : dir + "/sync-relay.key";
+}
+
+void WowtypeEngine::applySync() {
+    if (!sync_ && syncEnabled_) {
+        sync_ = wowtype_sync_new();
+    }
+    if (!sync_) {
+        // 没打开过，或者核心没带同步
+        syncTimer_.reset();
+        return;
+    }
+    std::string name = *config_.clipboardSyncDeviceName;
+    if (name.empty()) {
+        char host[256] = {};
+        if (gethostname(host, sizeof(host) - 1) == 0) {
+            name = host;
+        }
+    }
+    const std::string relayUrl = *config_.clipboardSyncRelayUrl;
+    const std::string keyFile = syncRelayKeyFile();
+    const std::string stateFile = syncStateFile();
+    WowtypeSyncConfig config{};
+    config.size = sizeof(config);
+    config.enabled = syncEnabled_ ? 1 : 0;
+    config.lan = *config_.clipboardSyncLan ? 1 : 0;
+    config.relay_url = relayUrl.c_str();
+    config.relay_key_file = keyFile.c_str();
+    config.state_file = stateFile.c_str();
+    config.device_name = name.c_str();
+    // 设置没变时核心什么都不做；变了在它自己的线程里重起，不卡这里
+    wowtype_sync_configure(sync_, &config);
+    if (!syncEnabled_) {
+        syncTimer_.reset();
+        return;
+    }
+    if (!syncTimer_) {
+        constexpr uint64_t kSyncPollUsec = 1000 * 1000;
+        syncTimer_ = instance_->eventLoop().addTimeEvent(
+            CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + kSyncPollUsec, kTimerAccuracyUsec,
+            [this](fcitx::EventSourceTime *source, uint64_t) {
+                tickSync();
+                source->setNextInterval(kSyncPollUsec);
+                source->setOneShot();
+                return true;
+            });
+    }
+}
+
+void WowtypeEngine::tickSync() {
+    if (!sync_ || !syncEnabled_) {
+        return;
+    }
+    // 本机剪贴板现在是什么。核心自己看变没变：没变不发，别的设备刚传来的不往回发，
+    // 打开同步后第一次报的只当基准
+    const std::string text = latestClipboard(instance_->mostRecentInputContext());
+    if (!text.empty()) {
+        wowtype_sync_observe(sync_, text.c_str());
+    }
+    // 别的设备复制过来的：核心已经记进剪贴板历史（v + 空格里能选）；这里再放进系统剪贴板，
+    // 好让 Ctrl+V 也能贴。一次来了好几条只放最新的
+    std::string latest;
+    while (const char *received = wowtype_sync_poll(sync_)) {
+        latest = received;
+        WLOG_I() << "WowType: 跨设备粘贴：收到 " << wowtype_sync_from(sync_) << " 复制的 "
+                       << latest.size() << " 字节";
+    }
+    if (!latest.empty() && syncPaste_) {
+        wowtype::copyToClipboard(latest);
     }
 }
 
@@ -2612,6 +2714,9 @@ void WowtypeEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
     auto *state = ic->propertyFor(&factory_);
     const fcitx::Key key = event.key();
     const auto sym = key.sym();
+    if (sync_ && syncEnabled_) {
+        wowtype_sync_touch(sync_);
+    }
     // 上屏后还没发的挪光标（自动配对）先发：应用要先把光标放好，再收到这个键或这个键上屏的字。
     // 这时应用报的周围文字还是挪之前的
     surroundingStale_ = flushCursorDelta();
@@ -2785,6 +2890,10 @@ void WowtypeEngine::activate(const fcitx::InputMethodEntry & /*entry*/,
     // 最近用过的 emoji 在核心里（所有输入框共用），存在 ~/.local/share/wowtype/emoji-recent.txt
     wowtype_recent_emoji_path(recentEmojiPath().c_str());
     sampleClipboard(ic);
+    if (sync_ && syncEnabled_) {
+        // 有人在用：中转服务那边保持连接，别的设备复制的马上能到
+        wowtype_sync_touch(sync_);
+    }
     maybeCheckUpdate();
 }
 
