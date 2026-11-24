@@ -296,7 +296,7 @@ public struct WowtypeConfig: Equatable {
     public var translateOneShot = false
     /// 用本地模型（HY-MT），默认是。配置文件里没写这一项、又填了 TranslateBaseUrl 时是 False（见 parse，三端一样）
     public var translateLocal = true
-    /// 本地模型文件，留空用数据目录下 models/HY-MT1.5-1.8B-Q4_K_M.gguf
+    /// 本地模型文件，留空用数据目录下 models/Hy-MT3-1.8B-Q4_K_M.gguf
     public var translateLocalModel = ""
     /// llama-server 的路径，留空自己找
     public var translateLlamaServer = ""
@@ -818,12 +818,12 @@ public struct WowtypeConfig: Equatable {
         # 双击 Shift 单次互译：打开后单按 Shift 只在中英之间切，0.35 秒内连按两下 Shift（或按互译键）
         # 进「译」只翻一句，译文上屏（或 Esc、单按 Shift 放弃）后回到原来的模式。关着时双击 Shift 不切换
         TranslateOneShot=\(b(d.translateOneShot))
-        # 用本地模型（腾讯 HY-MT 1.5 1.8B，离线）翻译，默认 True；False 用上面的服务。
+        # 用本地模型（腾讯混元 Hy-MT3 1.8B，离线）翻译，默认 True；False 用上面的服务。
         # 删掉这一行时：上面填了 TranslateBaseUrl 就当 False（以前的设置照旧用服务），没填就是 True。
         # 模型和运行它的 llama-server 在设置窗口「翻译」页一键下载，放在数据目录的 models/ 和 llama/
         # （模型不是开源许可，不适用于欧盟、英国和韩国，见 docs/CONFIG.md）
         TranslateLocal=\(b(d.translateLocal))
-        # 模型文件的位置，留空用 models/HY-MT1.5-1.8B-Q4_K_M.gguf
+        # 模型文件的位置，留空用 models/Hy-MT3-1.8B-Q4_K_M.gguf
         TranslateLocalModel=
         # llama-server 的位置，留空先用设置里下载的，再在 /opt/homebrew/bin、/usr/local/bin 等处找
         TranslateLlamaServer=

@@ -206,7 +206,7 @@ void EngineHost::applyTranslateSettings() {
     if (config_.flag("TranslateLocal")) {
         model = config_.value("TranslateLocalModel");
         if (model.empty()) {
-            model = narrow(dataDir() + L"\\models\\HY-MT1.5-1.8B-Q4_K_M.gguf");
+            model = narrow(dataDir() + L"\\models\\Hy-MT3-1.8B-Q4_K_M.gguf");
         }
         server = config_.value("TranslateLlamaServer");
     }

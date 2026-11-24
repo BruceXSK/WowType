@@ -97,12 +97,16 @@ constexpr UINT_PTR kTimerTranslateTest = 1;
 constexpr ULONGLONG kTranslateTestTimeoutMs = 45000;
 constexpr UINT kMessageProgress = WM_APP + 3;
 
-// 本地翻译模型（腾讯混元 HY-MT 1.5 1.8B，GGUF）和 llama.cpp 的 Windows 包：和 Linux 设置界面（settings/wowtype-config 的
-// LOCAL_MODEL_*、LLAMA_BUILD）、macOS 的 LocalModel.swift 同一个模型、同一个 llama.cpp 构建（windows/test.sh 核对）
-constexpr char kLocalModelFile[] = "HY-MT1.5-1.8B-Q4_K_M.gguf";
+// 本地翻译模型（腾讯混元 Hy-MT3 1.8B，GGUF，Apache-2.0）和 llama.cpp 的 Windows 包：和 Linux 设置界面
+// （settings/wowtype-config 的 LOCAL_MODEL_*、LLAMA_BUILD）、macOS 的 LocalModel.swift 同一个模型、同一个
+// llama.cpp 构建（windows/test.sh 核对）
+constexpr char kLocalModelFile[] = "Hy-MT3-1.8B-Q4_K_M.gguf";
 constexpr wchar_t kLocalModelUrl[] =
-    L"https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF/resolve/main/HY-MT1.5-1.8B-Q4_K_M.gguf";
-constexpr char kLocalModelSha256[] = "4383ac0c3c8e476de98ff979c2a3f069f8c4fb385e7860cf2d28da896cc477c7";
+    L"https://huggingface.co/tencent/Hy-MT3-1.8B-GGUF/resolve/main/Hy-MT3-1.8B-Q4_K_M.gguf";
+constexpr char kLocalModelSha256[] = "bae6e591103654ff43ef0de7d1492f6e6df1f955505f6bb2cc52e86fc399a942";
+// 上一代的默认模型（HY-MT 1.5 1.8B）：升级前下载过的照旧能用（核心 llama::LEGACY_MODEL_FILE 认它），
+// 再点下载会下新的，下好以后删掉它（和 Linux 设置的 LEGACY_MODEL_FILE 一样）
+constexpr wchar_t kLegacyModelFile[] = L"HY-MT1.5-1.8B-Q4_K_M.gguf";
 constexpr char kLlamaBuild[] = "b12110";
 #if defined(_M_ARM64)
 constexpr wchar_t kLlamaUrl[] = L"https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-win-cpu-arm64.zip";
@@ -277,6 +281,15 @@ std::wstring installDir() {
     std::wstring path(buffer, n);
     const auto slash = path.find_last_of(L"\\/");
     return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+/// 新模型（models\ 下的 kLocalModelFile）在了就删掉旁边上一代的。llama-server 还开着旧模型时删不掉，
+/// 下次打开设置窗口再删。
+void removeLegacyModel(const std::wstring &dir) {
+    const std::wstring models = dir + L"\\models\\";
+    if (GetFileAttributesW((models + widen(kLocalModelFile)).c_str()) != INVALID_FILE_ATTRIBUTES) {
+        DeleteFileW((models + kLegacyModelFile).c_str());
+    }
 }
 
 std::wstring dataDir() {
@@ -765,7 +778,9 @@ void SettingsWindow::build() {
                          kIdDiagnostics);
     voiceDownload_ = child(L"BUTTON", L"下载语音模型（约 100 MB，从微信输入法的服务器）…", BS_PUSHBUTTON | WS_TABSTOP,
                            kIdVoiceDownload);
-    localModel_ = child(L"BUTTON", L"下载本地翻译模型（1.13 GB）和 llama-server…", BS_PUSHBUTTON | WS_TABSTOP, kIdLocalModel);
+    localModel_ = child(L"BUTTON", L"下载本地翻译模型（1.35 GB）和 llama-server…", BS_PUSHBUTTON | WS_TABSTOP, kIdLocalModel);
+    // 上次升级时旧模型还被 llama-server 开着、没删掉的，这次补删
+    removeLegacyModel(dataDir());
     nnlm_ = child(L"BUTTON", L"导入整句增强模型（微信输入法的 nlrgpt2_nnlm.bin）…", BS_PUSHBUTTON | WS_TABSTOP, kIdNnlm);
     voiceModel_ = child(L"BUTTON", L"导入语音模型（含 .xnet 和 dict.decoder.utf8.txt 的文件夹）…",
                         BS_PUSHBUTTON | WS_TABSTOP, kIdVoiceModel);
@@ -1463,8 +1478,8 @@ void SettingsWindow::downloadLocalModel() {
         return;
     }
     if (MessageBoxW(hwnd_,
-                    L"本地翻译用腾讯混元 HY-MT 1.5 1.8B（1.13 GB），从 Hugging Face 下载，WowType 不分发它。\n"
-                    L"模型用的是《腾讯混元社区许可协议》：不适用于欧盟、英国和韩国境内，月活超过 1 亿的产品要另外向腾讯申请。\n"
+                    L"本地翻译用腾讯混元 Hy-MT3 1.8B（1.35 GB，Apache-2.0 许可），从 Hugging Face 下载，WowType 不分发它。\n"
+                    L"以前下载过上一代 HY-MT 1.5 的，新的下好以后会删掉它，下载期间照旧用它翻译。\n"
                     L"找不到 llama-server 时一起下载 llama.cpp 官方的 Windows 程序（MIT 许可）。继续吗？",
                     L"下载本地翻译模型", MB_OKCANCEL | MB_ICONINFORMATION) != IDOK) {
         return;
@@ -1475,12 +1490,13 @@ void SettingsWindow::downloadLocalModel() {
     const std::wstring dir = dataDir();
     const Config config = fromControls();
     std::wstring model = widen(config.value("TranslateLocalModel"));
-    if (model.empty()) {
+    const bool defaultPlace = model.empty();
+    if (defaultPlace) {
         model = dir + L"\\models\\" + widen(kLocalModelFile);
     }
     const bool needLlama = !llamaServerFound(dir, config.value("TranslateLlamaServer"));
     HWND window = hwnd_;
-    std::thread([dir, model, needLlama, window] {
+    std::thread([dir, model, defaultPlace, needLlama, window] {
         auto *result = new std::wstring(L"本地翻译模型装好了，在这一页打开「互译」、翻译引擎选「本地翻译（离线）」就能用");
         CreateDirectoryW(dir.c_str(), nullptr);
         if (GetFileAttributesW(model.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -1499,6 +1515,9 @@ void SettingsWindow::downloadLocalModel() {
             } else if (!MoveFileExW(staged.c_str(), model.c_str(), MOVEFILE_REPLACE_EXISTING)) {
                 *result = L"模型下好了，但放不到 " + model;
             }
+        }
+        if (defaultPlace) {
+            removeLegacyModel(dir);
         }
         if (needLlama && result->find(L"装好了") != std::wstring::npos) {
             const std::wstring zip = dir + L"\\llama.zip";

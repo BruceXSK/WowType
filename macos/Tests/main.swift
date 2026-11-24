@@ -2165,15 +2165,17 @@ do {
     check(LocalModel.llamaAsset(machine: "arm64", os: (13, 2)) == nil && LocalModel.llamaAsset(machine: "x86_64", os: (12, 7)) == nil,
           "macOS 13.3 以下没有能下载的 llama-server")
     check(LocalModel.llamaAsset(machine: "ppc", os: (26, 0)) == nil, "不认识的 CPU 没有")
-    check(LocalModel.size == 1_133_080_512 && LocalModel.sha256.count == 64 && LocalModel.url.hasSuffix("/" + LocalModel.fileName),
+    check(LocalModel.size == 1_348_432_160 && LocalModel.sha256.count == 64 && LocalModel.url.hasSuffix("/" + LocalModel.fileName),
           "模型钉了大小和 SHA256")
     // 和 Linux 设置钉的是同一个模型、同一个 llama.cpp 构建（规格目录旁边就是 settings/）
     let specDir = getenv("WOWTYPE_SPEC_DIR").map { String(cString: $0) } ?? "spec"
     if let linux = readFile(specDir + "/../settings/wowtype-config") {
         check(linux.contains("\"\(LocalModel.sha256)\"") && linux.contains("LOCAL_MODEL_SIZE = \(LocalModel.size)")
               && linux.contains("LOCAL_MODEL_FILE = \"\(LocalModel.fileName)\"")
+              && linux.contains("LEGACY_MODEL_FILE = \"\(LocalModel.legacyFileName)\"")
+              && linux.contains("LEGACY_MODEL_NAME = \"\(LocalModel.legacyName)\"")
               && linux.contains("LLAMA_BUILD = \"\(LocalModel.llamaBuild)\""),
-              "模型的 SHA256、大小和 llama.cpp 构建号和 Linux 的 wowtype-config 一样")
+              "模型的 SHA256、大小、上一代的文件名和 llama.cpp 构建号和 Linux 的 wowtype-config 一样")
     } else {
         print("skip 对照 Linux 的模型校验值（没找到 settings/wowtype-config）")
     }
@@ -2202,8 +2204,26 @@ do {
     check(!LocalModel.plan(modelExists: true, serverFound: true, customServer: true, asset: arm, serverOutdated: true).wantLlama,
           "自己写了 llama-server 的位置：不管构建号")
 
+    // 上一代模型（HY-MT 1.5）：新的没下载时照旧用它，另给「升级」；自己写了位置、新的下好了都不算
+    let dir = "/data/models/"
+    let wanted = dir + LocalModel.fileName, legacyFile = dir + LocalModel.legacyFileName
+    check(LocalModel.legacyPath(defaultModel: wanted) { $0 == legacyFile } == legacyFile, "只有上一代的模型：用它")
+    check(LocalModel.legacyPath(defaultModel: wanted) { _ in true } == nil, "新的下好了：不看上一代的")
+    check(LocalModel.legacyPath(defaultModel: wanted) { _ in false } == nil, "都没有：没有上一代的")
+    check(LocalModel.legacyPath(defaultModel: dir + "mine.gguf") { $0 == legacyFile } == nil, "不是默认文件名的不替它找")
+    let aging = LocalModel.plan(modelExists: true, serverFound: true, customServer: false, asset: arm, legacy: true)
+    check(aging.ready && aging.legacy && aging.canUpgrade && !aging.canDownload, "上一代模型：已就绪，可以升级", "\(aging)")
+    let agingNoServer = LocalModel.plan(modelExists: true, serverFound: false, customServer: false, asset: arm, legacy: true)
+    check(agingNoServer.canDownload && !agingNoServer.canUpgrade && agingNoServer.bytes == 16_650_691,
+          "上一代模型还差 llama-server：先补 llama-server", "\(agingNoServer)")
+    check(!LocalModel.plan(modelExists: false, serverFound: true, customServer: false, asset: arm, legacy: true).legacy
+          && !LocalModel.plan(modelExists: true, serverFound: true, customServer: false, asset: arm).canUpgrade,
+          "没有模型、或者已经是新模型：没有升级")
+    let up = LocalModel.upgradePlan
+    check(up.wantModel && !up.wantLlama && up.canDownload && up.bytes == LocalModel.size, "升级只下新模型", "\(up)")
+
     // 和 Linux 设置的 human_size 一样：f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB"
-    check(LocalModel.sizeText(LocalModel.size + 16_650_691) == "1.15 GB", "大小写成 1.15 GB（和 Linux 一样）",
+    check(LocalModel.sizeText(LocalModel.size + 16_650_691) == "1.37 GB", "大小写成 1.37 GB（和 Linux 一样）",
           LocalModel.sizeText(LocalModel.size + 16_650_691))
     check(LocalModel.sizeText(16_650_691) == "17 MB" && LocalModel.sizeText(1_950_000_000) == "1.95 GB"
           && LocalModel.sizeText(2_004_000_000) == "2.00 GB" && LocalModel.sizeText(1_133_080_512) == "1.13 GB",

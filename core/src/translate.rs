@@ -13,7 +13,7 @@
 //! 哔哩哔哩的 Index-Translate（免费、不用 Key 的公开接口，也是 OpenAI 格式）是专门的翻译模型，
 //! 不认通用的系统提示词，要用它官方的「带约束翻译」提示词，见 [`TranslateConfig::is_index_translate`]。
 //!
-//! 也可以用本地模型（腾讯 HY-MT 1.5 1.8B）：[`TranslateConfig::local`] 有值时，第一次翻译
+//! 也可以用本地模型（腾讯混元 Hy-MT3 1.8B）：[`TranslateConfig::local`] 有值时，第一次翻译
 //! 由 [`crate::llama::LocalServer`] 起一个只监听本机的 `llama-server`，闲置一段时间后停掉，
 //! 请求还是走同一套 OpenAI 格式的接口。
 

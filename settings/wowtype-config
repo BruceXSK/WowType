@@ -3809,17 +3809,20 @@ def lexicon_self_test():
 # ---------------------------------------------------------------- 互译
 
 
-# 本地翻译模型：腾讯混元 HY-MT 1.5 1.8B（GGUF，Q4_K_M）。不随 WowType 分发，用户确认许可后下载
-LOCAL_MODEL_FILE = "HY-MT1.5-1.8B-Q4_K_M.gguf"
+# 本地翻译模型：腾讯混元 Hy-MT3 1.8B（GGUF，Q4_K_M，Apache-2.0）。不随 WowType 分发，用户点了才下载
+LOCAL_MODEL_FILE = "Hy-MT3-1.8B-Q4_K_M.gguf"
 LOCAL_MODEL_URL = os.environ.get("WOWTYPE_LOCAL_MODEL_URL") or (
-    "https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF/resolve/main/" + LOCAL_MODEL_FILE)
+    "https://huggingface.co/tencent/Hy-MT3-1.8B-GGUF/resolve/main/" + LOCAL_MODEL_FILE)
 LOCAL_MODEL_SHA256 = os.environ.get("WOWTYPE_LOCAL_MODEL_SHA256") or (
-    "4383ac0c3c8e476de98ff979c2a3f069f8c4fb385e7860cf2d28da896cc477c7")
-LOCAL_MODEL_SIZE = 1133080512
-LOCAL_MODEL_PAGE = "https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF"
-LOCAL_MODEL_LICENSE = LOCAL_MODEL_PAGE + "/blob/main/License.txt"
-LOCAL_MODEL_TERMS = ("模型属于腾讯，用的是《腾讯混元社区许可协议》：不适用于欧盟、英国和韩国境内，"
-                     "月活超过 1 亿的产品要另外向腾讯申请。模型从 Hugging Face 下载，WowType 不分发它。")
+    "bae6e591103654ff43ef0de7d1492f6e6df1f955505f6bb2cc52e86fc399a942")
+LOCAL_MODEL_SIZE = 1348432160
+LOCAL_MODEL_PAGE = "https://huggingface.co/tencent/Hy-MT3-1.8B-GGUF"
+LOCAL_MODEL_LICENSE = LOCAL_MODEL_PAGE + "/blob/main/LICENSE.txt"
+LOCAL_MODEL_TERMS = "模型是腾讯混元的 Hy-MT3 1.8B，Apache-2.0 许可。从 Hugging Face 下载，WowType 不分发它。"
+# 上一代的默认模型（HY-MT 1.5 1.8B）：升级前下载过的照旧能用（核心 llama::LEGACY_MODEL_FILE 也认），
+# 设置里给「升级」，新的下好以后删掉它
+LEGACY_MODEL_FILE = "HY-MT1.5-1.8B-Q4_K_M.gguf"
+LEGACY_MODEL_NAME = "HY-MT 1.5"
 MODELS_DIR = os.path.join(DATA_DIR, "models")
 
 
@@ -3832,9 +3835,44 @@ TRANSLATE_ENGINES = [
 BILIBILI_PRIVACY = "要翻译的文字会发到哔哩哔哩的服务器（index-translate.bilibili.com）"
 
 
-def local_model_path(values):
+def local_model_dest(values, models_dir=None):
+    """模型下载到哪：设置里写了 TranslateLocalModel 就是那里，没写是 models/ 下现在这一代的文件。"""
     custom = values.get("TranslateLocalModel", "").strip()
-    return os.path.expanduser(custom) if custom else os.path.join(MODELS_DIR, LOCAL_MODEL_FILE)
+    return os.path.expanduser(custom) if custom else os.path.join(
+        models_dir or MODELS_DIR, LOCAL_MODEL_FILE)
+
+
+def legacy_model_path(values, models_dir=None):
+    """还在用上一代模型时它的位置：没自己写位置、新的没下载、models/ 里有上一代的文件。不是返回 None。"""
+    if values.get("TranslateLocalModel", "").strip():
+        return None
+    models_dir = models_dir or MODELS_DIR
+    legacy = os.path.join(models_dir, LEGACY_MODEL_FILE)
+    if os.path.isfile(legacy) and not os.path.isfile(os.path.join(models_dir, LOCAL_MODEL_FILE)):
+        return legacy
+    return None
+
+
+def local_model_path(values, models_dir=None):
+    """输入法现在会用的模型文件（和核心 LocalConfig::model_file 一样：新的不在、上一代的在就用上一代的）。"""
+    return legacy_model_path(values, models_dir) or local_model_dest(values, models_dir)
+
+
+def remove_legacy_model(models_dir=None):
+    """新模型下好以后删掉上一代的（连同没下完的 .part）。返回空出多少字节。"""
+    models_dir = models_dir or MODELS_DIR
+    if not os.path.isfile(os.path.join(models_dir, LOCAL_MODEL_FILE)):
+        return 0
+    freed = 0
+    for name in (LEGACY_MODEL_FILE, LEGACY_MODEL_FILE + ".part"):
+        path = os.path.join(models_dir, name)
+        try:
+            size = os.path.getsize(path)
+            os.unlink(path)
+            freed += size
+        except OSError:
+            pass
+    return freed
 
 
 # llama-server：系统里没有时从 llama.cpp 官方发布页下载（MIT 许可）。钉死一个构建和它的 SHA256，
@@ -4013,16 +4051,10 @@ def download_model(dest, url=None, sha256=None, progress=None, cancelled=None, t
     return dest
 
 
-def download_model_cli(accepted):
-    """命令行下载本地翻译模型；要先同意许可（--accept-license）。"""
+def download_model_cli():
+    """命令行下载本地翻译模型。Apache-2.0 许可，不用另外确认（以前的 --accept-license 还认，不起作用）。"""
     print(LOCAL_MODEL_TERMS)
-    print(f"协议全文：{LOCAL_MODEL_LICENSE}\n")
-    if not accepted:
-        if not sys.stdin.isatty():
-            print("加 --accept-license 表示接受上面的许可")
-            return 2
-        if input("接受这份许可并下载？[y/N] ").strip().lower() not in ("y", "yes"):
-            return 1
+    print(f"许可全文：{LOCAL_MODEL_LICENSE}\n")
     dest = os.path.join(MODELS_DIR, LOCAL_MODEL_FILE)
 
     def progress(done, total):
@@ -4034,6 +4066,8 @@ def download_model_cli(accepted):
         else:
             download_model(dest, progress=progress)
             print(f"\n模型好了：{dest}")
+        if freed := remove_legacy_model():
+            print(f"已删除上一代的 {LEGACY_MODEL_NAME}，空出 {human_size(freed)}")
         if server := find_llama_server(read_config().get("TranslateLlamaServer", "")):
             print(f"llama-server：{server}")
         elif llama_asset():
@@ -4441,6 +4475,27 @@ def download_self_test():
             assert not os.path.exists(dest) and os.path.exists(dest + ".part")
         assert local_model_path({"TranslateLocalModel": ""}).endswith(LOCAL_MODEL_FILE)
         assert local_model_path({"TranslateLocalModel": "~/x.gguf"}) == os.path.expanduser("~/x.gguf")
+        # 上一代模型：新的没下载时照旧用它，新的下好了删掉它；自己写了位置的不管
+        models = os.path.join(tmp, "generations")
+        os.makedirs(models)
+        new, old = os.path.join(models, LOCAL_MODEL_FILE), os.path.join(models, LEGACY_MODEL_FILE)
+        none, custom = {"TranslateLocalModel": ""}, {"TranslateLocalModel": "~/x.gguf"}
+        assert legacy_model_path(none, models) is None and local_model_path(none, models) == new
+        assert remove_legacy_model(models) == 0
+        with open(old, "wb") as f:
+            f.write(b"old!")
+        with open(old + ".part", "wb") as f:
+            f.write(b"x")
+        assert legacy_model_path(none, models) == old and local_model_path(none, models) == old
+        assert local_model_dest(none, models) == new, "升级下到新文件名"
+        assert legacy_model_path(custom, models) is None
+        assert local_model_path(custom, models) == os.path.expanduser("~/x.gguf")
+        assert remove_legacy_model(models) == 0 and os.path.isfile(old), "新的还没下好不删旧的"
+        with open(new, "wb") as f:
+            f.write(b"new")
+        assert legacy_model_path(none, models) is None and local_model_path(none, models) == new
+        assert remove_legacy_model(models) == 5
+        assert not os.path.exists(old) and not os.path.exists(old + ".part") and os.path.isfile(new)
     server.shutdown()
 
 
@@ -7155,7 +7210,7 @@ class SettingsWindow(Adw.ApplicationWindow):
     def build_local_translate(self):
         group = Adw.PreferencesGroup(title="离线翻译模型")
         group.set_header_suffix(self.info_button(
-            "腾讯混元的翻译模型 HY-MT。翻译时占 1.5 GB 左右内存，一会儿不用就自动释放。"
+            "腾讯混元的翻译模型 Hy-MT3。翻译时占 2 GB 左右内存，一会儿不用就自动释放。"
             "找不到 llama-server 时一起下载 llama.cpp 官方的（MIT 许可）。\n\n"
             + LOCAL_MODEL_TERMS, [("许可协议全文", LOCAL_MODEL_LICENSE)]))
         self.local_model_row = Adw.ActionRow(title="翻译模型")
@@ -7200,11 +7255,13 @@ class SettingsWindow(Adw.ApplicationWindow):
         return os.path.isfile(local_model_path(self.values)) and bool(
             find_llama_server(self.values["TranslateLlamaServer"]))
 
-    def local_missing(self):
+    def local_missing(self, upgrade=False):
         """还差什么没下载：（要不要模型, 要不要 llama-server, 一共多少字节）。
 
-        llama-server 只在系统里没有、这台机器又有现成的官方包时才算。"""
-        want_model = not os.path.isfile(local_model_path(self.values))
+        llama-server 只在系统里没有、这台机器又有现成的官方包时才算。upgrade：还在用上一代模型时
+        把新模型也算进去（点「升级」时）。"""
+        want_model = not os.path.isfile(local_model_path(self.values)) or (
+            upgrade and bool(legacy_model_path(self.values)))
         asset = llama_asset()
         want_llama = bool(asset) and not find_llama_server(self.values["TranslateLlamaServer"])
         size = (LOCAL_MODEL_SIZE if want_model else 0) + (asset[1] if want_llama else 0)
@@ -7224,8 +7281,14 @@ class SettingsWindow(Adw.ApplicationWindow):
         server = find_llama_server(self.values["TranslateLlamaServer"])
         mine = downloaded_llama_server()
         want_model, want_llama, size = self.local_missing()
+        # 还在用上一代模型：能用，另给「升级」
+        legacy = bool(legacy_model_path(self.values))
         if downloading:
             pass  # 进度由下载线程更新
+        elif not want_model and server and legacy:
+            self.local_model_row.set_subtitle(GLib.markup_escape_text(
+                f"在用上一代的 {LEGACY_MODEL_NAME}（{human_size(os.path.getsize(path))}），"
+                f"可以升级到 Hy-MT3（{human_size(LOCAL_MODEL_SIZE)}）"))
         elif not want_model and server:
             self.local_model_row.set_subtitle(GLib.markup_escape_text(
                 f"已下载（{human_size(os.path.getsize(path))}）"))
@@ -7236,8 +7299,9 @@ class SettingsWindow(Adw.ApplicationWindow):
             self.local_model_row.set_subtitle("还差 llama.cpp，见「更多选项」")
         else:
             self.local_model_row.set_subtitle(GLib.markup_escape_text(f"要下载 {human_size(size)}"))
-        self.local_download.set_label("取消" if downloading else "下载")
-        self.local_download.set_visible(downloading or want_model or want_llama)
+        upgrade = legacy and not want_model and not want_llama
+        self.local_download.set_label("取消" if downloading else "升级" if upgrade else "下载")
+        self.local_download.set_visible(downloading or want_model or want_llama or legacy)
         self.local_delete.set_visible(
             not downloading and not self.values["TranslateLocalModel"]
             and (os.path.isfile(path) or bool(mine)))
@@ -7257,36 +7321,43 @@ class SettingsWindow(Adw.ApplicationWindow):
         if self.local_cancel is not None:
             self.local_cancel.set()
             return
+        # 模型能用、只差 llama-server 时先把它补上；都齐了、还在用上一代模型，点的就是「升级」
         want_model, want_llama, size = self.local_missing()
-        if not want_model or os.path.exists(local_model_path(self.values) + ".part"):
-            # 只差 llama-server，或者模型下到一半（开始下时已经同意过许可）：不用再确认，接着下（和 macOS 一样）
-            self.start_local_download()
+        upgrade = not want_model and not want_llama and bool(legacy_model_path(self.values))
+        if upgrade:
+            want_model, want_llama, size = self.local_missing(upgrade=True)
+        if not want_model or os.path.exists(local_model_dest(self.values) + ".part"):
+            # 只差 llama-server，或者模型下到一半（开始下时已经确认过）：不用再确认，接着下（和 macOS 一样）
+            self.start_local_download(upgrade)
             return
         extra = ("同时下载运行模型的程序 llama-server（llama.cpp 官方发布，MIT 许可）。"
                  if want_llama else "")
+        if upgrade:
+            extra = f"下好以后删掉上一代的 {LEGACY_MODEL_NAME}，下载期间照旧用它翻译。"
         dialog = AlertDialog(
-            heading="下载离线翻译模型？",
-            body=f"一共 {human_size(size)}，下载完会校验文件。{extra}\n\n"
-                 f"{LOCAL_MODEL_TERMS}\n\n点「同意并下载」表示你接受这份许可。")
+            heading="升级离线翻译模型？" if upgrade else "下载离线翻译模型？",
+            body=f"一共 {human_size(size)}，下载完会校验文件。{extra}\n\n{LOCAL_MODEL_TERMS}")
         dialog.add_response("cancel", "取消")
-        dialog.add_response("accept", "同意并下载")
+        dialog.add_response("accept", "升级" if upgrade else "下载")
         dialog.set_response_appearance("accept", ResponseAppearance.SUGGESTED)
 
         def answered(_dialog, response):
             if response == "accept":
-                self.start_local_download()
+                self.start_local_download(upgrade)
         dialog.connect("response", answered)
         dialog.present(self)
 
-    def start_local_download(self):
+    def start_local_download(self, upgrade=False):
         """把还差的都下了：模型，和系统里没有时的 llama-server。进度都显示在「翻译模型」那一行。
 
         模型下到现在用的位置：设置里写了 TranslateLocalModel 就下到那里，没写下到 models/（和 macOS 一样），
-        下完就能用，不会出现下好了却还显示缺模型。"""
-        dest = local_model_path(self.values)
-        want_model, want_llama, _size = self.local_missing()
+        下完就能用，不会出现下好了却还显示缺模型。upgrade：还在用上一代模型，把新的下到 models/，
+        校验过了再删旧的。"""
+        dest = local_model_dest(self.values)
+        want_model, want_llama, _size = self.local_missing(upgrade)
         if self.local_cancel is not None or not (want_model or want_llama):
             return
+        default_place = not self.values["TranslateLocalModel"]
         cancel = threading.Event()
         self.local_cancel = cancel
         self.local_model_row.set_subtitle("正在连接…")
@@ -7306,6 +7377,8 @@ class SettingsWindow(Adw.ApplicationWindow):
             try:
                 if want_model:
                     download_model(dest, progress=progress_of("模型"), cancelled=cancel.is_set)
+                    if default_place:
+                        remove_legacy_model()
                 if want_llama:
                     install_llama_server(progress=progress_of("运行程序"), cancelled=cancel.is_set)
             except DownloadCancelled:
@@ -7335,6 +7408,11 @@ class SettingsWindow(Adw.ApplicationWindow):
         try:
             if freed:
                 os.unlink(path)
+            # 升级下到一半的也一起删
+            part = local_model_dest(self.values) + ".part"
+            if os.path.isfile(part):
+                freed += os.path.getsize(part)
+                os.unlink(part)
         except OSError as e:
             self.toast(f"删不掉：{e.strerror}")
         else:
@@ -8179,7 +8257,7 @@ if __name__ == "__main__":
             print(f"已保存到 {export_diagnostics(os.path.abspath(target))}")
         sys.exit(0)
     if "--download-model" in sys.argv:
-        sys.exit(download_model_cli("--accept-license" in sys.argv))
+        sys.exit(download_model_cli())
     for flag in ("--install-voice-model", "--remove-voice-model"):
         if flag in sys.argv:
             at = sys.argv.index(flag)

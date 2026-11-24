@@ -971,9 +971,9 @@ private struct TranslatePage: View {
 
     /// 选了本地模型：一行状态（下载 / 进度 / 已就绪），别的都收进「更多选项」；说明和许可在组标题旁的 ⓘ
     private var localGroup: some View {
-        PrefGroup("离线翻译模型", info: "腾讯混元的翻译模型 HY-MT。翻译时占 1.5 GB 左右内存，一会儿不用就自动释放。"
+        PrefGroup("离线翻译模型", info: "腾讯混元的翻译模型 Hy-MT3。翻译时占 2 GB 左右内存，一会儿不用就自动释放。"
                   + "找不到 llama-server 时一起下载 llama.cpp 官方的（MIT 许可）。\n\n" + LocalModel.terms,
-                  links: [("许可协议全文", URL(string: LocalModel.license)!)]) {
+                  links: [("许可全文", URL(string: LocalModel.license)!)]) {
             LocalModelRow(model: model)
             RowDivider()
             ExpanderRow(title: "更多选项") {
@@ -1074,7 +1074,8 @@ private struct ModelPicker: View {
     }
 }
 
-/// 本地模型那一行：没下载给「下载」和大小，下载中给进度和「取消」，好了写「已就绪」。
+/// 本地模型那一行：没下载给「下载」和大小，下载中给进度和「取消」，好了写「已就绪」；
+/// 还在用上一代模型时给「升级」。
 private struct LocalModelRow: View {
     @ObservedObject var model: SettingsModel
     @Environment(\.palette) private var palette
@@ -1090,6 +1091,10 @@ private struct LocalModelRow: View {
                     .monospacedDigit()
                     .foregroundColor(.secondary)
                 Button("取消") { model.cancelLocalDownload() }
+            } else if plan.canUpgrade {
+                Text("在用上一代的 \(LocalModel.legacyName)，可以升级到 Hy-MT3（\(LocalModel.sizeText(LocalModel.size))）")
+                    .foregroundColor(.secondary)
+                Button("升级") { model.downloadLocalModel() }
             } else if plan.ready {
                 Label("已就绪", systemImage: "checkmark.circle.fill")
                     .foregroundColor(palette.accentText)

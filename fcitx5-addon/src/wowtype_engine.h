@@ -317,7 +317,7 @@ FCITX_CONFIGURATION(
     // 互译只翻一句（#191），默认关：关着时 Shift 照旧 中 → 英 → 译 → 中，双击 Shift 不切换
     fcitx::Option<bool> translateOneShot{
         this, "TranslateOneShot", "双击 Shift 单次互译（单按 Shift 只切中英，翻完一句自动回来）", false};
-    // 本地模型（腾讯 HY-MT 1.5 1.8B）：第一次翻译时起 llama-server，闲置后停掉。
+    // 本地模型（腾讯混元 Hy-MT3 1.8B）：第一次翻译时起 llama-server，闲置后停掉。
     // 默认用本地模型；旧配置文件里没写这一项时见 loadWowtypeConfig
     fcitx::Option<bool> translateLocal{this, "TranslateLocal", "用本地模型翻译（HY-MT，离线）",
                                        true};

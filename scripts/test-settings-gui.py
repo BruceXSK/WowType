@@ -375,6 +375,31 @@ def run(app):
     dialog("清除打字统计（取消）", lambda: win.stats_clear(None))
     dialog("删语音模型（取消）", lambda: win.on_voice_delete(None))
     dialog("下载离线翻译模型（取消）", lambda: win.on_local_download(None))
+
+    def local_upgrade():
+        # 升级前下载过上一代翻译模型：照旧算下载好了，按钮变成「升级」，确认框能取消
+        models = ns["MODELS_DIR"]
+        os.makedirs(models, exist_ok=True)
+        legacy = os.path.join(models, ns["LEGACY_MODEL_FILE"])
+        with open(legacy, "wb") as f:
+            f.write(b"gguf")
+        saved = win.values["TranslateLlamaServer"]
+        win.values["TranslateLlamaServer"] = sys.executable  # 当成找到了 llama-server
+        try:
+            win.refresh_local_translate()
+            check(win.local_ready(), "只有上一代模型时应该算下载好了")
+            check(win.local_download.get_visible() and win.local_download.get_label() == "升级",
+                  f"上一代模型没给「升级」：{win.local_download.get_label()}")
+            check("上一代" in win.local_model_row.get_subtitle(), win.local_model_row.get_subtitle())
+            for w in new_windows(win, lambda: win.on_local_download(None)):
+                w.close()
+            check(win.local_cancel is None and os.path.isfile(legacy), "取消升级不该动旧模型")
+        finally:
+            win.values["TranslateLlamaServer"] = saved
+            os.unlink(legacy)
+            win.refresh_local_translate()
+        check(win.local_download.get_label() == "下载", "没有模型时按钮应该是「下载」")
+    step("上一代翻译模型给升级", local_upgrade)
     dialog("恢复默认设置（确定）", win.on_reset, answer=1)
     dialog("导出日志（取消）", win.on_export_log)
     dialog("导入自定义词（取消）", win.on_import_words)

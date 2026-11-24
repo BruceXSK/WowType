@@ -194,7 +194,7 @@ final class AppState {
     var voiceModelDir: String { VoiceModelInstaller.folder(in: supportDir).path }
 
     var localModelPath: String {
-        supportDir.appendingPathComponent("models/HY-MT1.5-1.8B-Q4_K_M.gguf").path
+        supportDir.appendingPathComponent("models/Hy-MT3-1.8B-Q4_K_M.gguf").path
     }
 
     /// 设置里没填 TranslateLlamaServer 时去哪找 llama-server：输入法是系统启动的，PATH 里只有
