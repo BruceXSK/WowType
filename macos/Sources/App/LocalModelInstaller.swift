@@ -89,14 +89,38 @@ enum LocalModelInstaller {
                                 sha256: env("WOWTYPE_LLAMA_SHA256") ?? asset.sha256)
     }
 
-    static func plan(model: String, customServer: String, supportDir: URL) -> LocalModel.Plan {
+    static func plan(model: String, customServer: String, supportDir: URL, legacy: Bool = false) -> LocalModel.Plan {
         let server = findServer(custom: customServer, supportDir: supportDir)
         // 用的是以前下载的 llama-server，构建号（解包时写的 VERSION）不是现在钉的：当成要重新下载
         let outdated = server != nil && server == downloadedServer(in: supportDir)
             && downloadedBuild(in: supportDir) != LocalModel.llamaBuild
         return LocalModel.plan(modelExists: isFile(model), serverFound: server != nil,
                                customServer: !customServer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                               asset: llamaAsset, serverOutdated: outdated)
+                               asset: llamaAsset, serverOutdated: outdated, legacy: legacy)
+    }
+
+    /// 还在用上一代模型时它的位置（defaultModel 是没自己写位置时用的文件）；不是返回 nil
+    static func legacyModel(defaultModel: String) -> String? {
+        LocalModel.legacyPath(defaultModel: defaultModel, exists: isFile)
+    }
+
+    /// 新模型下好以后删掉旁边上一代的（连同没下完的 .part），返回空出的字节数。新的不在时什么都不删
+    @discardableResult
+    static func removeLegacy(defaultModel: String) -> Int64 {
+        guard defaultModel.hasSuffix("/" + LocalModel.fileName), isFile(defaultModel) else { return 0 }
+        return removeLegacyFiles(defaultModel: defaultModel)
+    }
+
+    private static func removeLegacyFiles(defaultModel: String) -> Int64 {
+        guard defaultModel.hasSuffix("/" + LocalModel.fileName) else { return 0 }
+        let legacy = String(defaultModel.dropLast(LocalModel.fileName.count)) + LocalModel.legacyFileName
+        let fm = FileManager.default
+        var freed: Int64 = 0
+        for path in [legacy, legacy + ".part"] where fm.fileExists(atPath: path) {
+            freed += fileSize(path)
+            try? fm.removeItem(atPath: path)
+        }
+        return freed
     }
 
     /// 模型下了一半（.part 还在）：再下载是接着下
@@ -140,6 +164,8 @@ enum LocalModelInstaller {
                 freed += fileSize(path)
                 try? fm.removeItem(atPath: path)
             }
+            // 还在用的上一代模型也是下载的，一起删
+            freed += removeLegacyFiles(defaultModel: model)
         }
         let llama = llamaDir(in: supportDir)
         freed += LexiconPackInstaller.folderSize(llama)

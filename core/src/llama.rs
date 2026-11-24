@@ -18,8 +18,12 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// 默认的模型文件名（腾讯 HY-MT 1.5 1.8B，Q4_K_M 量化）。
-pub const MODEL_FILE: &str = "HY-MT1.5-1.8B-Q4_K_M.gguf";
+/// 默认的模型文件名（腾讯混元 Hy-MT3 1.8B，Q4_K_M 量化，Apache-2.0）。
+pub const MODEL_FILE: &str = "Hy-MT3-1.8B-Q4_K_M.gguf";
+
+/// 上一代默认模型（HY-MT 1.5 1.8B）的文件名。以前下载过它、还没换成 [`MODEL_FILE`] 的照旧能用，
+/// 见 [`LocalConfig::model_file`]。
+pub const LEGACY_MODEL_FILE: &str = "HY-MT1.5-1.8B-Q4_K_M.gguf";
 
 /// 等模型载入的最长时间。老机器从机械硬盘读 1 GB 也够了。
 const LOAD_TIMEOUT: Duration = Duration::from_secs(90);
@@ -44,7 +48,20 @@ pub fn expand_home(path: &str) -> PathBuf {
 
 impl LocalConfig {
     pub fn model_exists(&self) -> bool {
-        self.model.is_file()
+        self.model_file().is_file()
+    }
+
+    /// 实际载入的模型文件。外壳在设置里没写位置时给的是 `models/` 下的 [`MODEL_FILE`]；它不在、
+    /// 旁边有上一代的 [`LEGACY_MODEL_FILE`]（升级前下载的）就用那个，不逼着重新下载 1 GB。
+    /// 每次用之前现看：设置界面把新模型下好、删了旧的，下一句话就换过去（见 [`LocalServer::acquire`]）。
+    pub fn model_file(&self) -> PathBuf {
+        if !self.model.is_file() && self.model.file_name().is_some_and(|n| n == MODEL_FILE) {
+            let legacy = self.model.with_file_name(LEGACY_MODEL_FILE);
+            if legacy.is_file() {
+                return legacy;
+            }
+        }
+        self.model.clone()
     }
 
     /// 找 llama-server：写了路径就用路径；只写名字就在 PATH 里找，再看设置界面下载的那份
@@ -189,6 +206,11 @@ impl LocalServer {
     ///
     /// 会阻塞到模型载入完（第一次要几秒），只能在后台线程里调。
     pub fn acquire(&self, config: &LocalConfig) -> Result<Lease, String> {
+        // 记下的是实际载入的文件：旧模型换成新模型以后和正在跑的对不上，下面会停掉重起
+        let config = &LocalConfig {
+            model: config.model_file(),
+            ..config.clone()
+        };
         let (lock, cvar) = &*self.state;
         let mut s = lock.lock().unwrap();
         while s.starting {
@@ -730,6 +752,58 @@ mod tests {
 
     fn launch_count(launches: &Path) -> usize {
         std::fs::read_to_string(launches).map_or(0, |s| s.lines().count())
+    }
+
+    #[test]
+    fn legacy_model_is_used_until_the_new_one_is_downloaded() {
+        let dir = tempdir::Dir::new();
+        let wanted = dir.path().join(MODEL_FILE);
+        let legacy = dir.path().join(LEGACY_MODEL_FILE);
+        let config = |model: &Path| LocalConfig {
+            model: model.to_path_buf(),
+            server: String::new(),
+            idle_secs: 0,
+        };
+        assert!(!config(&wanted).model_exists(), "两个都没有：还没下载");
+        assert_eq!(config(&wanted).model_file(), wanted);
+        std::fs::write(&legacy, b"gguf").unwrap();
+        assert!(config(&wanted).model_exists(), "只有上一代的：照旧能用");
+        assert_eq!(config(&wanted).model_file(), legacy);
+        // 自己写了别的文件名的不替它找
+        let custom = dir.path().join("mine.gguf");
+        assert!(!config(&custom).model_exists());
+        assert_eq!(config(&custom).model_file(), custom);
+        std::fs::write(&wanted, b"gguf").unwrap();
+        assert_eq!(config(&wanted).model_file(), wanted, "新的下好了就用新的");
+        // 明写了上一代那个文件的，一直用它
+        assert_eq!(config(&legacy).model_file(), legacy);
+    }
+
+    #[test]
+    fn switches_to_the_new_model_once_it_appears() {
+        if !python_available() {
+            return;
+        }
+        let dir = tempdir::Dir::new();
+        let wanted = dir.path().join(MODEL_FILE);
+        let legacy = dir.path().join(LEGACY_MODEL_FILE);
+        std::fs::write(&legacy, b"gguf").unwrap();
+        let config = LocalConfig {
+            model: wanted.clone(),
+            server: fake_server(dir.path()).to_string_lossy().into_owned(),
+            idle_secs: 0,
+        };
+        let server = LocalServer::new();
+        drop(server.acquire(&config).unwrap());
+        let old = server.pid().unwrap();
+        drop(server.acquire(&config).unwrap());
+        assert_eq!(server.pid(), Some(old), "模型没变就复用");
+        // 设置界面下好了新模型、删了旧的
+        std::fs::write(&wanted, b"gguf").unwrap();
+        std::fs::remove_file(&legacy).unwrap();
+        drop(server.acquire(&config).unwrap());
+        assert_ne!(server.pid(), Some(old), "换了模型文件要重起");
+        server.shutdown();
     }
 
     #[test]

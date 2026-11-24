@@ -1,18 +1,30 @@
-// 本地翻译模型（腾讯混元 HY-MT 1.5 1.8B）和跑它的 llama-server：下载地址、校验值、大小。
+// 本地翻译模型（腾讯混元 Hy-MT3 1.8B）和跑它的 llama-server：下载地址、校验值、大小。
 // 模型和 Linux 设置（settings/wowtype-config 的 LOCAL_MODEL_*）是同一个文件；llama-server 用同一个构建
 // （LLAMA_BUILD），换成官方的 macOS 包。要换版本就改这里，大小和 SHA256 一起改。
 // 下载、解压在 App 层（LocalModelInstaller），这里只放规矩，不依赖 Foundation，测试在 Linux 上也能跑。
 
 public enum LocalModel {
-    public static let fileName = "HY-MT1.5-1.8B-Q4_K_M.gguf"
-    public static let url = "https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF/resolve/main/" + fileName
-    public static let sha256 = "4383ac0c3c8e476de98ff979c2a3f069f8c4fb385e7860cf2d28da896cc477c7"
-    public static let size: Int64 = 1_133_080_512
-    public static let page = "https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF"
-    public static let license = page + "/blob/main/License.txt"
-    /// 下载前给用户看的许可要点
-    public static let terms = "模型属于腾讯，用的是《腾讯混元社区许可协议》：不适用于欧盟、英国和韩国境内，"
-        + "月活超过 1 亿的产品要另外向腾讯申请。模型从 Hugging Face 下载，WowType 不分发它。"
+    public static let fileName = "Hy-MT3-1.8B-Q4_K_M.gguf"
+    public static let url = "https://huggingface.co/tencent/Hy-MT3-1.8B-GGUF/resolve/main/" + fileName
+    public static let sha256 = "bae6e591103654ff43ef0de7d1492f6e6df1f955505f6bb2cc52e86fc399a942"
+    public static let size: Int64 = 1_348_432_160
+    public static let page = "https://huggingface.co/tencent/Hy-MT3-1.8B-GGUF"
+    public static let license = page + "/blob/main/LICENSE.txt"
+    /// 下载前给用户看的说明（Apache-2.0，不用另外确认许可）
+    public static let terms = "模型是腾讯混元的 Hy-MT3 1.8B，Apache-2.0 许可。从 Hugging Face 下载，WowType 不分发它。"
+
+    /// 上一代的默认模型（HY-MT 1.5 1.8B）：升级前下载过的照旧能用（核心 llama::LEGACY_MODEL_FILE 也认），
+    /// 设置里给「升级」，新的下好以后删掉它。和 Linux 设置的 LEGACY_MODEL_FILE 一样
+    public static let legacyFileName = "HY-MT1.5-1.8B-Q4_K_M.gguf"
+    public static let legacyName = "HY-MT 1.5"
+
+    /// 还在用上一代模型时它的位置：defaultModel 是没自己写位置时用的文件（models/ 下的 fileName），
+    /// 它不在、旁边有上一代的文件就返回那个；不是返回 nil。exists 看一个路径是不是文件。
+    public static func legacyPath(defaultModel: String, exists: (String) -> Bool) -> String? {
+        guard defaultModel.hasSuffix("/" + fileName), !exists(defaultModel) else { return nil }
+        let legacy = String(defaultModel.dropLast(fileName.count)) + legacyFileName
+        return exists(legacy) ? legacy : nil
+    }
 
     /// llama.cpp 官方发布的构建（MIT 许可），和 Linux 的一样
     public static let llamaBuild = "b12110"
@@ -56,21 +68,31 @@ public enum LocalModel {
         public var bytes: Int64
         /// 数据目录里下载过的 llama-server 不是现在钉的构建（WowType 更新换了 llamaBuild）：要重新下载
         public var llamaOutdated = false
+        /// 在用的是上一代模型（legacyFileName）：能用，另外可以升级
+        public var legacy = false
 
         public var ready: Bool { !wantModel && !wantLlama && !llamaUnavailable }
         public var canDownload: Bool { wantModel || wantLlama }
+        /// 别的都齐了、只是模型还是上一代的：给「升级」（还差 llama-server 时先把它补上）
+        public var canUpgrade: Bool { legacy && !canDownload }
+    }
+
+    /// 点「升级」时要下的：只有新模型
+    public static var upgradePlan: Plan {
+        Plan(wantModel: true, wantLlama: false, llamaUnavailable: false, bytes: size)
     }
 
     /// serverFound：找到能用的 llama-server；customServer：设置里自己写了 llama-server 的位置
     /// （写了就只用它，不替它下载）；asset：这台 Mac 能下载的官方包；serverOutdated：找到的是以前下载的、
-    /// 构建号不是 llamaBuild 的那份，当成要重新下载（下载不了时照旧用它）。
+    /// 构建号不是 llamaBuild 的那份，当成要重新下载（下载不了时照旧用它）。legacy：modelExists 说的是上一代模型。
     public static func plan(modelExists: Bool, serverFound: Bool, customServer: Bool, asset: Asset?,
-                            serverOutdated: Bool = false) -> Plan {
+                            serverOutdated: Bool = false, legacy: Bool = false) -> Plan {
         let wantLlama = (!serverFound || serverOutdated) && !customServer && asset != nil
         let bytes = (modelExists ? 0 : size) + (wantLlama ? asset?.size ?? 0 : 0)
         return Plan(wantModel: !modelExists, wantLlama: wantLlama,
                     llamaUnavailable: !serverFound && !wantLlama, bytes: bytes,
-                    llamaOutdated: serverFound && serverOutdated && wantLlama)
+                    llamaOutdated: serverFound && serverOutdated && wantLlama,
+                    legacy: legacy && modelExists)
     }
 
     // MARK: 显示

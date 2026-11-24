@@ -1540,7 +1540,7 @@ void WowtypeEngine::applyConfig() {
         if (*config_.translateLocal) {
             localModel = *config_.translateLocalModel;
             if (localModel.empty()) {
-                localModel = userDataDir() + "/models/HY-MT1.5-1.8B-Q4_K_M.gguf";
+                localModel = userDataDir() + "/models/Hy-MT3-1.8B-Q4_K_M.gguf";
             }
             translateModel = "本地 HY-MT";
         }

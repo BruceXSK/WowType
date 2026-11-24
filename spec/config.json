@@ -297,7 +297,7 @@
        ]
      }},
     {"key": "TranslateLocalModel", "type": "string", "default": "",
-     "platforms": ["fcitx5", "settings", "macos", "windows"], "note": "本地模型文件，留空用数据目录下 models/HY-MT1.5-1.8B-Q4_K_M.gguf"},
+     "platforms": ["fcitx5", "settings", "macos", "windows"], "note": "本地模型文件，留空用数据目录下 models/Hy-MT3-1.8B-Q4_K_M.gguf"},
     {"key": "TranslateLlamaServer", "type": "string", "default": "",
      "platforms": ["fcitx5", "settings", "macos", "windows"], "note": "llama-server 的路径，留空自己找"},
     {"key": "TranslateIdleMinutes", "type": "int", "default": 5, "min": 0, "max": 240,

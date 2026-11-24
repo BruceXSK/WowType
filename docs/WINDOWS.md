@@ -120,7 +120,7 @@ DLL 装进每个应用的进程里，载入以后不会卸载：换 DLL 前先�
 | `emoji-recent.txt` | 最近用过的 emoji |
 | `translate.key` | 互译的 API Key（一行） |
 | `wetype\nlrgpt2_nnlm.bin` | 导入的微信输入法整句增强模型（有就先用它） |
-| `models\HY-MT1.5-1.8B-Q4_K_M.gguf`、`llama\llama-server.exe` | 本地翻译模型和 llama.cpp（`TranslateLlamaServer` 留空时先在 PATH 里找） |
+| `models\Hy-MT3-1.8B-Q4_K_M.gguf`、`llama\llama-server.exe` | 本地翻译模型和 llama.cpp（`TranslateLlamaServer` 留空时先在 PATH 里找） |
 | `wtlocal\` | 语音识别模型（微信输入法的离线模型，不随安装包分发，自己放进来） |
 | `stats.json` | 打字统计（`TypingStats=True` 才记，默认关），格式同另两端 |
 | `update-state`、`update\` | 检查更新的结果、下载的新版安装程序 |
@@ -140,7 +140,8 @@ DLL 装进每个应用的进程里，载入以后不会卸载：换 DLL 前先�
 校验大小和 MD5，用系统的 `tar.exe` 解包到 `wtlocal\`），也能导入现成的模型文件夹；「统计」页看打字统计
 （今天、一共、最快的一天、连续天数，最近 30 天的柱状图，键盘热力图，口径、键盘排法、深浅五档都和 macOS 一样），能清空；「常规」页能复制诊断信息
 （版本、数据文件、打过码的设置、最近的日志）。
-「翻译」页能一键下载本地翻译模型（HY-MT 1.5 1.8B，和另两端同一个文件、同一个 SHA256，先给许可说明）和 llama.cpp 官方的
+「翻译」页能一键下载本地翻译模型（Hy-MT3 1.8B，和另两端同一个文件、同一个 SHA256；以前下载过上一代 HY-MT 1.5 的照旧能用，
+再点下载会换成新的、下好以后删掉旧的）和 llama.cpp 官方的
 Windows 程序（`b12110` 的 CPU 包，钉死 SHA256，解到 `llama\`；PATH 里、设置里有 llama-server 就不下）。
 「翻译」页的「翻译引擎」和 Linux、macOS 一样三选一（本地翻译 / 哔哩哔哩 / 自定义翻译服务，[CONFIG.md](CONFIG.md#翻译引擎)），
 选哪个下面只出现哪个的设置：本地是模型文件、llama-server、下载按钮；哔哩哔哩是模型（Index-Translate-2B / 9B / 35B-A3B）
