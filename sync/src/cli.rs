@@ -22,6 +22,7 @@
 //!     → ready 端口             开始听了
 //!     → recv 设备名<TAB>内容   每收到一条一行（内容里的换行写成 \n）
 //! wowtype-sync send 文字 --state 文件 --name 设备名 --host 地址:端口   直接送给这个地址 → ok
+//! wowtype-sync send 文字 --state 文件 --name 设备名 --relay … --relay-key-file …   经中转服务发 → ok
 //! ```
 //!
 //! 访问口令只从文件读，不走命令行参数（`ps` 看得到参数）。
@@ -330,16 +331,30 @@ fn listen(config: crate::service::Config, seconds: Option<u64>, say: &mut dyn Fn
     0
 }
 
-/// `send`：拿配对文件里的组密钥封一个信封，直接送到 `host`。
-fn send(state_file: &std::path::Path, name: &str, host: SocketAddr, text: &str) -> Result<(), String> {
+/// `send`：拿配对文件里的组密钥封一个信封，直接送到 `host`，或者（没给 `host`）经中转服务发。
+fn send(
+    state_file: &std::path::Path,
+    name: &str,
+    host: Option<SocketAddr>,
+    relay: Option<&Relay>,
+    text: &str,
+) -> Result<(), String> {
     let state = State::load(state_file).map_err(|e| e.to_string())?;
     let key = state.group_key.ok_or("这台设备还没有配对")?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
     let payload = json!({ "text": text, "name": name }).to_string();
-    let envelope = crate::crypto::GroupKeys::derive(&key).seal(&state.device_id, now, payload.as_bytes());
-    lan::send_frame(host, &envelope).map_err(|e| format!("送不过去：{e}"))
+    let keys = crate::crypto::GroupKeys::derive(&key);
+    let envelope = keys.seal(&state.device_id, now, payload.as_bytes());
+    match (host, relay) {
+        (Some(host), _) => lan::send_frame(host, &envelope).map_err(|e| format!("送不过去：{e}")),
+        (None, Some(relay)) => relay
+            .push(&keys.channel, &envelope)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        (None, None) => Err("要给 --host 地址:端口，或者中转服务（--relay）".to_string()),
+    }
 }
 
 /// 命令行入口。`args` 不含程序名。返回退出码。
@@ -477,9 +492,10 @@ pub fn run(args: &[String], out: &mut dyn Write) -> i32 {
             };
             pair_host(&options, &cancel, &mut announce).map(|d| format!("paired {}", d.name))
         }
-        "send" => match (positional.first(), host) {
-            (Some(text), Some(host)) => send(&state_file, &name, host, text).map(|_| "ok".to_string()),
-            _ => Err("要给文字和 --host 地址:端口".to_string()),
+        "send" => match positional.first() {
+            Some(text) => send(&state_file, &name, host, options.relay.as_ref(), text)
+                .map(|_| "ok".to_string()),
+            None => Err("要给文字".to_string()),
         },
         "pair-join" => match positional.first() {
             Some(code) => pair_join(&options, code).map(|d| format!("paired {}", d.name)),
@@ -650,7 +666,9 @@ mod tests {
             lines.lock().unwrap().clone()
         };
         assert_eq!(wait(1), vec![format!("ready {port}")]);
-        send(&b, "另一台", SocketAddr::from((Ipv4Addr::LOCALHOST, port)), "第一行\n第二行").unwrap();
+        let host = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        send(&b, "另一台", Some(host), None, "第一行\n第二行").unwrap();
+        assert!(send(&b, "另一台", None, None, "没地方发").is_err());
         assert_eq!(wait(2)[1], "recv 另一台\t第一行\\n第二行");
         assert_eq!(listening.join().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);

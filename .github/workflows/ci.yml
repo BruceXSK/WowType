@@ -65,6 +65,21 @@ jobs:
       - name: Windows 外壳里和平台无关的部分（组字、设置、语音键、自定义词、统计）在 Linux 上也测
         run: windows/test.sh
 
+  relay:
+    # 跨设备复制粘贴的中转服务（relay/cloudflare）在 Cloudflare 的本地运行时（wrangler dev 起的 workerd，
+    # 真的 Durable Object）里走一遍接口。要从 npm 下 wrangler，不在 release 的 needs 里，挂了不挡发版。
+    name: 中转服务（workerd）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 起 wrangler dev，对着它跑验收脚本
+        working-directory: relay/cloudflare
+        run: |
+          echo 'TOKEN=ci-token' > .dev.vars
+          WRANGLER_SEND_METRICS=false npx --yes wrangler@4 dev --port 8791 --ip 127.0.0.1 > wrangler.log 2>&1 &
+          for _ in $(seq 90); do curl -sf http://127.0.0.1:8791/ >/dev/null && break; sleep 1; done
+          node test/live.mjs http://127.0.0.1:8791 ci-token || { cat wrangler.log; exit 1; }
+
   core-macos:
     # 核心和 C 接口在 macOS 上一直能编、能过测试。不在 release 的 needs 里，挂了不挡 Linux 发版。
     name: Rust 核心测试（macOS）

@@ -29,6 +29,12 @@ npx wrangler secret put TOKEN  # 把它贴进去
 
 没设口令之前服务什么都不给（返回 503）。
 
+部署完可以让它自己走一遍接口，确认能用（用的是随机的信道，不碰你设备上的内容）：
+
+```bash
+node test/live.mjs https://wowtype-sync-relay.<你的子域>.workers.dev <访问口令>
+```
+
 ## 在 WowType 里填
 
 每台设备上：WowType 设置 →「输入」→「跨设备复制粘贴」→「更多选项」，填上面的地址和访问口令，点「测试」。
@@ -61,3 +67,15 @@ node --test relay/cloudflare/test/relay.test.mjs
 
 Worker 的代码直接在 node 里跑（假的 Durable Object 存储）。`cargo test -p wowtype-sync` 里中转服务那几条
 也是拿它测的。
+
+想在本机用 Cloudflare 的运行时（workerd，真的 Durable Object）跑：
+
+```bash
+cd relay/cloudflare
+echo 'TOKEN=随便一串' > .dev.vars
+npx wrangler dev --port 8791        # 另开一个终端
+node test/live.mjs http://127.0.0.1:8791 随便一串
+```
+
+CI 里的「中转服务（workerd）」任务跑的就是这个。本机地址可以直接填进 WowType（只有本机地址允许用 `http://`），
+拿 `wowtype-sync pair-host / pair-join / listen / send` 加 `--relay http://127.0.0.1:8791 --no-lan` 能走完整个流程。
