@@ -149,6 +149,12 @@ const std::vector<SettingDef> &settingDefs() {
         {"Calculator", T::Bool, "True"},
         {"Toolbar", T::Bool, "True"},
         {"ClipboardHistory", T::Bool, "False"},
+        // 跨设备复制粘贴（docs/SYNC.md）。Windows 上由设置程序起的后台进程收发（--sync-agent），
+        // 收到的总是放进系统剪贴板，所以没有 ClipboardSyncPaste
+        {"ClipboardSync", T::Bool, "False"},
+        {"ClipboardSyncLan", T::Bool, "True"},
+        {"ClipboardSyncRelayUrl", T::String, ""},
+        {"ClipboardSyncDeviceName", T::String, ""},
         {"AutoSpace", T::Bool, "False"},
         {"AutoSpaceLetters", T::Bool, "True"},
         {"AutoSpaceDigits", T::Bool, "True"},
