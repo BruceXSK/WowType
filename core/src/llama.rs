@@ -64,6 +64,38 @@ impl LocalConfig {
         self.model.clone()
     }
 
+    /// 新模型（[`MODEL_FILE`]）在了，旁边上一代的就没人用了：删掉它和没下完的半截（`.part`，Windows
+    /// 设置窗口的 `.download`），空出 1 GB 多，返回空出的字节数。设置界面下好新模型时自己会删；这里
+    /// 兜底——旧模型当时还被 llama-server 开着（Windows 上删不掉）、设置界面中途被关掉的，下一次起
+    /// llama-server 前补删。只动 WowType 自己的数据目录（`…/wowtype/models/`）；自己写了别的位置、
+    /// 明写着用上一代那个文件的、新的还没下好的，都不删。
+    pub fn remove_legacy_model(&self) -> u64 {
+        let ours = self.model.parent().is_some_and(|models| {
+            models.file_name().is_some_and(|n| n == "models")
+                && models
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|n| n.eq_ignore_ascii_case("wowtype"))
+        });
+        if !ours || !self.model.file_name().is_some_and(|n| n == MODEL_FILE) || !self.model.is_file()
+        {
+            return 0;
+        }
+        let mut freed = 0;
+        for suffix in ["", ".part", ".download", ".download.part"] {
+            let path = self
+                .model
+                .with_file_name(format!("{LEGACY_MODEL_FILE}{suffix}"));
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.is_file() && std::fs::remove_file(&path).is_ok() {
+                freed += meta.len();
+            }
+        }
+        freed
+    }
+
     /// 找 llama-server：写了路径就用路径；只写名字就在 PATH 里找，再看设置界面下载的那份
     /// （[`downloaded_server`]）。找不到返回 None。
     pub fn server_path(&self) -> Option<PathBuf> {
@@ -226,6 +258,8 @@ impl LocalServer {
                     config.model.display()
                 ));
             }
+            // 用上了新模型：上一代的没人用了（开着它的 llama-server 上面已经停掉），删掉腾地方
+            config.remove_legacy_model();
             let server = config.server_path().ok_or_else(|| {
                 "翻译失败：没找到 llama-server（在设置的「翻译」页点下载，或者自己装 llama.cpp）"
                     .to_string()
@@ -780,13 +814,58 @@ mod tests {
     }
 
     #[test]
+    fn legacy_model_is_removed_once_the_new_one_is_there() {
+        let dir = tempdir::Dir::new();
+        let models = dir.path().join("WowType").join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        let config = |model: PathBuf| LocalConfig {
+            model,
+            server: String::new(),
+            idle_secs: 0,
+        };
+        let wanted = models.join(MODEL_FILE);
+        let legacy = models.join(LEGACY_MODEL_FILE);
+        let leftovers = [".part", ".download", ".download.part"]
+            .map(|suffix| models.join(format!("{LEGACY_MODEL_FILE}{suffix}")));
+        let other = models.join("mine.gguf");
+        std::fs::write(&legacy, b"legacy").unwrap();
+        std::fs::write(&other, b"mine").unwrap();
+        for path in &leftovers {
+            std::fs::write(path, b"xx").unwrap();
+        }
+        assert_eq!(config(wanted.clone()).remove_legacy_model(), 0);
+        assert!(legacy.is_file(), "新的还没下好：旧的留着接着用");
+        std::fs::write(&wanted, b"new").unwrap();
+        assert_eq!(config(legacy.clone()).remove_legacy_model(), 0);
+        assert_eq!(config(other.clone()).remove_legacy_model(), 0);
+        assert!(legacy.is_file(), "设置里明写着用旧的、或者用别的文件：不删");
+        assert_eq!(config(wanted.clone()).remove_legacy_model(), 6 + 2 * 3);
+        assert!(!legacy.exists() && leftovers.iter().all(|p| !p.exists()));
+        assert!(wanted.is_file() && other.is_file(), "只删上一代的");
+        assert_eq!(config(wanted.clone()).remove_legacy_model(), 0);
+
+        // 不在 WowType 自己的数据目录里的不碰（用户自己放模型的地方）
+        let elsewhere = dir.path().join("my-models");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join(MODEL_FILE), b"new").unwrap();
+        std::fs::write(elsewhere.join(LEGACY_MODEL_FILE), b"legacy").unwrap();
+        assert_eq!(
+            config(elsewhere.join(MODEL_FILE)).remove_legacy_model(),
+            0
+        );
+        assert!(elsewhere.join(LEGACY_MODEL_FILE).is_file());
+    }
+
+    #[test]
     fn switches_to_the_new_model_once_it_appears() {
         if !python_available() {
             return;
         }
         let dir = tempdir::Dir::new();
-        let wanted = dir.path().join(MODEL_FILE);
-        let legacy = dir.path().join(LEGACY_MODEL_FILE);
+        let models = dir.path().join("wowtype").join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        let wanted = models.join(MODEL_FILE);
+        let legacy = models.join(LEGACY_MODEL_FILE);
         std::fs::write(&legacy, b"gguf").unwrap();
         let config = LocalConfig {
             model: wanted.clone(),
@@ -798,11 +877,11 @@ mod tests {
         let old = server.pid().unwrap();
         drop(server.acquire(&config).unwrap());
         assert_eq!(server.pid(), Some(old), "模型没变就复用");
-        // 设置界面下好了新模型、删了旧的
+        // 设置界面下好了新模型，旧的还没来得及删（Windows 上被 llama-server 开着删不掉）
         std::fs::write(&wanted, b"gguf").unwrap();
-        std::fs::remove_file(&legacy).unwrap();
         drop(server.acquire(&config).unwrap());
         assert_ne!(server.pid(), Some(old), "换了模型文件要重起");
+        assert!(!legacy.exists(), "换到新模型以后删掉上一代的");
         server.shutdown();
     }
 

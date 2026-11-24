@@ -283,12 +283,15 @@ std::wstring installDir() {
     return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
 }
 
-/// 新模型（models\ 下的 kLocalModelFile）在了就删掉旁边上一代的。llama-server 还开着旧模型时删不掉，
-/// 下次打开设置窗口再删。
+/// 新模型（models\ 下的 kLocalModelFile）在了就删掉旁边上一代的，连同它没下完的半截。llama-server 还开着
+/// 旧模型时删不掉：核心下一次用新模型起 llama-server 前会补删（LocalConfig::remove_legacy_model）。
 void removeLegacyModel(const std::wstring &dir) {
     const std::wstring models = dir + L"\\models\\";
-    if (GetFileAttributesW((models + widen(kLocalModelFile)).c_str()) != INVALID_FILE_ATTRIBUTES) {
-        DeleteFileW((models + kLegacyModelFile).c_str());
+    if (GetFileAttributesW((models + widen(kLocalModelFile)).c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return;
+    }
+    for (const wchar_t *suffix : {L"", L".download", L".download.part"}) {
+        DeleteFileW((models + kLegacyModelFile + suffix).c_str());
     }
 }
 
@@ -779,8 +782,6 @@ void SettingsWindow::build() {
     voiceDownload_ = child(L"BUTTON", L"下载语音模型（约 100 MB，从微信输入法的服务器）…", BS_PUSHBUTTON | WS_TABSTOP,
                            kIdVoiceDownload);
     localModel_ = child(L"BUTTON", L"下载本地翻译模型（1.35 GB）和 llama-server…", BS_PUSHBUTTON | WS_TABSTOP, kIdLocalModel);
-    // 上次升级时旧模型还被 llama-server 开着、没删掉的，这次补删
-    removeLegacyModel(dataDir());
     nnlm_ = child(L"BUTTON", L"导入整句增强模型（微信输入法的 nlrgpt2_nnlm.bin）…", BS_PUSHBUTTON | WS_TABSTOP, kIdNnlm);
     voiceModel_ = child(L"BUTTON", L"导入语音模型（含 .xnet 和 dict.decoder.utf8.txt 的文件夹）…",
                         BS_PUSHBUTTON | WS_TABSTOP, kIdVoiceModel);

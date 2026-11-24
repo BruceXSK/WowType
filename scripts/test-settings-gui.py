@@ -394,12 +394,54 @@ def run(app):
             for w in new_windows(win, lambda: win.on_local_download(None)):
                 w.close()
             check(win.local_cancel is None and os.path.isfile(legacy), "取消升级不该动旧模型")
+            # 真升级一遍（下载地址换成本机的假服务）：新模型下好、校验过了，旧模型和它的半截都删掉
+            import hashlib
+            import http.server
+            import threading
+            blob = os.urandom(200_000)
+
+            class Handler(http.server.BaseHTTPRequestHandler):
+                def log_message(self, *_a):
+                    pass
+
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(blob)))
+                    self.end_headers()
+                    self.wfile.write(blob)
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            config = type(win).start_local_download.__globals__
+            pinned = config["LOCAL_MODEL_URL"], config["LOCAL_MODEL_SHA256"]
+            config["LOCAL_MODEL_URL"] = f"http://127.0.0.1:{server.server_address[1]}/m.gguf"
+            config["LOCAL_MODEL_SHA256"] = hashlib.sha256(blob).hexdigest()
+            new = os.path.join(models, ns["LOCAL_MODEL_FILE"])
+            with open(legacy + ".part", "wb") as f:
+                f.write(b"half")
+            try:
+                win.start_local_download(True)
+                check(win.local_cancel is not None, "升级没开始下载")
+                check(pump_until(lambda: win.local_cancel is None, 60), "升级没下完")
+                check(os.path.isfile(new) and open(new, "rb").read() == blob, "新模型没下到 models/")
+                check(not os.path.exists(legacy) and not os.path.exists(legacy + ".part"),
+                      "新模型下好以后旧模型没删掉")
+                check(os.listdir(models) == [ns["LOCAL_MODEL_FILE"]], f"models/ 里多了东西：{os.listdir(models)}")
+                check(win.local_ready() and not win.local_download.get_visible()
+                      and "已下载" in win.local_model_row.get_subtitle(),
+                      f"升级完应该是已下载：{win.local_model_row.get_subtitle()}")
+            finally:
+                config["LOCAL_MODEL_URL"], config["LOCAL_MODEL_SHA256"] = pinned
+                server.shutdown()
+                if os.path.exists(new):
+                    os.unlink(new)
         finally:
             win.values["TranslateLlamaServer"] = saved
-            os.unlink(legacy)
+            for path in (legacy, legacy + ".part"):
+                if os.path.exists(path):
+                    os.unlink(path)
             win.refresh_local_translate()
         check(win.local_download.get_label() == "下载", "没有模型时按钮应该是「下载」")
-    step("上一代翻译模型给升级", local_upgrade)
+    step("上一代翻译模型给升级，升级完删掉旧的", local_upgrade)
     dialog("恢复默认设置（确定）", win.on_reset, answer=1)
     dialog("导出日志（取消）", win.on_export_log)
     dialog("导入自定义词（取消）", win.on_import_words)
