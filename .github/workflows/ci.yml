@@ -58,6 +58,8 @@ jobs:
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
+      - name: 跨设备复制粘贴的中转服务（Cloudflare Worker 的代码，在 node 里跑）
+        run: node --test relay/cloudflare/test/relay.test.mjs
       - name: C ABI 冒烟测试
         run: ./scripts/abi-smoke.sh
       - name: Windows 外壳里和平台无关的部分（组字、设置、语音键、自定义词、统计）在 Linux 上也测
@@ -588,6 +590,8 @@ jobs:
             echo "安装包里有不能分发的模型"; exit 1
           fi
           wowtype-check --lexicon /usr/share/wowtype/lexicon.tsv --s2t /usr/share/wowtype/s2t.tsv
+          # 跨设备复制粘贴的配对工具装上了、起得来
+          wowtype-sync status --state /tmp/wowtype-sync-smoke.json | grep -q '"paired":false'
           wowtype-show --lexicon /usr/share/wowtype/lexicon.tsv nihao | tee /tmp/show.txt
           grep -q '1\.你好' /tmp/show.txt
           # 设置界面：能 import GTK 4 / libadwaita，拼音整理逻辑正确
@@ -669,6 +673,8 @@ jobs:
             echo "安装包里有不能分发的模型"; exit 1
           fi
           wowtype-check --lexicon /usr/share/wowtype/lexicon.tsv --s2t /usr/share/wowtype/s2t.tsv
+          # 跨设备复制粘贴的配对工具装上了、起得来
+          wowtype-sync status --state /tmp/wowtype-sync-smoke.json | grep -q '"paired":false'
           # 不用 grep -q 直接接在管道后面，避免 pipefail 把上游 SIGPIPE 当成测试失败。
           wowtype-show --lexicon /usr/share/wowtype/lexicon.tsv nihao | tee dist/show.txt
           grep -q '1\.你好' dist/show.txt
@@ -751,6 +757,8 @@ jobs:
             echo "安装包里有不能分发的模型"; exit 1
           fi
           wowtype-check --lexicon /usr/share/wowtype/lexicon.tsv --s2t /usr/share/wowtype/s2t.tsv
+          # 跨设备复制粘贴的配对工具装上了、起得来
+          wowtype-sync status --state /tmp/wowtype-sync-smoke.json | grep -q '"paired":false'
           # 不用 grep -q 直接接在管道后面，避免 pipefail 把上游 SIGPIPE 当成测试失败。
           wowtype-show --lexicon /usr/share/wowtype/lexicon.tsv nihao | tee dist/show.txt
           grep -q '1\.你好' dist/show.txt
@@ -807,6 +815,8 @@ jobs:
           test -f /usr/share/fcitx5/addon/wowtype.conf
           test -f /usr/share/fcitx5/inputmethod/wowtype.conf
           wowtype-check --lexicon /usr/share/wowtype/lexicon.tsv --s2t /usr/share/wowtype/s2t.tsv
+          # 跨设备复制粘贴的配对工具装上了、起得来
+          wowtype-sync status --state /tmp/wowtype-sync-smoke.json | grep -q '"paired":false'
           wowtype-show --lexicon /usr/share/wowtype/lexicon.tsv nihao | tee dist/show.txt
           grep -q '1\.你好' dist/show.txt
           wowtype-config --self-test

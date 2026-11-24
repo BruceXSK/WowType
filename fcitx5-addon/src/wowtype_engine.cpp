@@ -2222,14 +2222,14 @@ std::string WowtypeEngine::recentEmojiPath() const {
     return dir.empty() ? std::string() : dir + "/emoji-recent.txt";
 }
 
-std::string WowtypeEngine::latestClipboard(fcitx::InputContext *ic) {
+std::optional<std::string> WowtypeEngine::latestClipboard(fcitx::InputContext *ic) {
     // 密码框里不读（clipboard 插件自己也不记标成密码的内容）
     if (!ic || ic->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive)) {
-        return {};
+        return std::nullopt;
     }
     auto *addon = instance_->addonManager().addon("clipboard");
     if (!addon) {
-        return {};
+        return std::nullopt;
     }
     return addon->call<fcitx::IClipboard::clipboard>(ic);
 }
@@ -2238,9 +2238,9 @@ void WowtypeEngine::sampleClipboard(fcitx::InputContext *ic) {
     if (!clipboardHistory_) {
         return;
     }
-    const std::string text = latestClipboard(ic);
-    if (!text.empty()) {
-        wowtype_clipboard_remember(text.c_str());
+    const auto text = latestClipboard(ic);
+    if (text && !text->empty()) {
+        wowtype_clipboard_remember(text->c_str());
     }
 }
 
@@ -2312,9 +2312,10 @@ void WowtypeEngine::tickSync() {
     }
     // 本机剪贴板现在是什么。核心自己看变没变：没变不发，别的设备刚传来的不往回发，
     // 打开同步后第一次报的只当基准
-    const std::string text = latestClipboard(instance_->mostRecentInputContext());
-    if (!text.empty()) {
-        wowtype_sync_observe(sync_, text.c_str());
+    // 空的也要报：刚开机还没复制过东西时，基准就是「空」，这样第一次复制的才发得出去。
+    // 现在读不了（密码框里）就不报，免得出了密码框把原来那条又当成新复制的
+    if (const auto text = latestClipboard(instance_->mostRecentInputContext())) {
+        wowtype_sync_observe(sync_, text->c_str());
     }
     // 别的设备复制过来的：核心已经记进剪贴板历史（v + 空格里能选）；这里再放进系统剪贴板，
     // 好让 Ctrl+V 也能贴。一次来了好几条只放最新的

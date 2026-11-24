@@ -763,7 +763,8 @@ int64_t wowtype_stats_now_ms(void);
  * 线程都是核心自己的，下面的函数都不阻塞。外壳要做的：
  *   1. 设置变了调 wowtype_sync_configure；
  *   2. 定时（一秒左右）把本机剪贴板现在的文字交给 wowtype_sync_observe（密码框里、标了「机密」的不交）；
- *      configure 以后第一次交的只当基准，不发；
+ *      configure 以后第一次交的只当基准，不发——所以剪贴板是空的也要交（交空串），不然开机以后
+ *      第一次复制的会被当成基准吞掉；
  *   3. 定时调 wowtype_sync_poll 取别的设备复制过来的，想让 Ctrl+V 也能贴就写进系统剪贴板
  *      （写进去以后 observe 报回来的同一段文字不会再往回发）；
  *   4. 有按键、切到输入法时调 wowtype_sync_touch（最近没人用就不一直挂着中转服务的连接）。

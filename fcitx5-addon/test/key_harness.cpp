@@ -3568,7 +3568,7 @@ void runSyncCase(Instance &instance, std::function<void()> done) {
                     c->ticks = 0;
                 }
                 break;
-            default:
+            case 4:
                 if (c->ticks >= 25) {
                     check(received.find("关掉以后复制的") == std::string::npos,
                           "跨设备：关掉以后不发：" + received);
@@ -3576,6 +3576,27 @@ void runSyncCase(Instance &instance, std::function<void()> done) {
                     type(c->ic.get(), "v<sp>1");
                     check(page(c->ic.get()).empty(), "跨设备：关掉以后收到的也清掉：" + join(page(c->ic.get())));
                     type(c->ic.get(), "<esc>");
+                    // 刚开机、还没复制过东西（剪贴板是空的）时打开：之后第一次复制的要发得出去
+                    setClipboard("");
+                    std::ofstream(confDir + "/wowtype.conf") << "ClipboardSync=True\nClipboardSyncPaste=False\n";
+                    addon->reloadConfig();
+                    c->stage = 5;
+                    c->ticks = 0;
+                }
+                break;
+            case 5:
+                if (c->ticks >= 30) {
+                    setClipboard("开机后第一次复制的");
+                    c->stage = 6;
+                    c->ticks = 0;
+                }
+                break;
+            default:
+                if (received.find("开机后第一次复制的") != std::string::npos || c->ticks > 150) {
+                    check(received.find("\t开机后第一次复制的\n") != std::string::npos,
+                          "跨设备：剪贴板原来是空的，第一次复制的也发：" + received);
+                    std::ofstream(confDir + "/wowtype.conf") << "";
+                    addon->reloadConfig();
                     finished = true;
                 }
                 break;

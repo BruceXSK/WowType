@@ -566,8 +566,9 @@ private:
     void fillToolPanel(fcitx::InputContext *ic, WowtypeState *state);
     /// 剪贴板历史：从 fcitx5 的 clipboard 插件拿最新一条交给核心（没有这个插件就什么都不做）。
     void sampleClipboard(fcitx::InputContext *ic);
-    /// fcitx5 的 clipboard 插件里最新的一条；密码框里、没有这个插件时是空串。
-    std::string latestClipboard(fcitx::InputContext *ic);
+    /// fcitx5 的 clipboard 插件里最新的一条（还没复制过东西是空串）；现在读不了——密码框里、
+    /// 没有输入框、没有这个插件——是 nullopt。
+    std::optional<std::string> latestClipboard(fcitx::InputContext *ic);
 
     // 跨设备复制粘贴
     /// 配对文件（设备编号、组密钥），WowType 设置配对时写。

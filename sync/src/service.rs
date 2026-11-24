@@ -9,7 +9,7 @@
 //! - 发送线程：把要发的信封送给局域网里的设备和中转服务。
 
 use std::collections::{HashSet, VecDeque};
-use std::net::{SocketAddr, TcpListener, UdpSocket};
+use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -407,19 +407,15 @@ fn start(shared: &Arc<Shared>, config: &Config) -> Option<Run> {
                     "wowtype-sync-lan-in",
                     Box::new(move || accept_loop(&ctx, listener)),
                 );
-                match lan::bind_udp(config.lan_port) {
-                    Ok(socket) => {
-                        let ctx = Arc::clone(&context);
-                        let interval = config.beacon_interval;
-                        let mut targets = lan::broadcast_targets(config.lan_port);
-                        targets.extend(config.extra_targets.iter().copied());
-                        spawn(
-                            "wowtype-sync-lan-find",
-                            Box::new(move || beacon_loop(&ctx, socket, port, interval, targets)),
-                        );
-                    }
-                    Err(e) => context.lan_error(format!("局域网发现用的端口打不开：{e}")),
-                }
+                let ctx = Arc::clone(&context);
+                let interval = config.beacon_interval;
+                let udp_port = config.lan_port;
+                let mut targets = lan::broadcast_targets(config.lan_port);
+                targets.extend(config.extra_targets.iter().copied());
+                spawn(
+                    "wowtype-sync-lan-find",
+                    Box::new(move || beacon_loop(&ctx, udp_port, port, interval, targets)),
+                );
             }
             Err(e) => context.lan_error(format!("局域网收信的端口打不开：{e}")),
         }
@@ -557,11 +553,28 @@ fn send_loop(ctx: &Context, to_send: Receiver<String>, relay: Option<Relay>) {
 
 fn beacon_loop(
     ctx: &Context,
-    socket: UdpSocket,
+    udp_port: u16,
     tcp_port: u16,
     interval: Duration,
     targets: Vec<SocketAddr>,
 ) {
+    // 发现用的端口是固定的，偶尔会被别的程序临时占着（浏览器给 DNS 查询随机挑端口时可能正好挑中）：
+    // 绑不上先报出来，隔一会儿再试，绑上了把报错清掉
+    let socket = loop {
+        match lan::bind_udp(udp_port) {
+            Ok(socket) => {
+                ctx.shared.inner.lock().unwrap().status.lan_error = None;
+                break socket;
+            }
+            Err(e) => {
+                ctx.lan_error(format!("局域网发现用的端口（{udp_port}）打不开：{e}"));
+                nap(ctx, interval, false);
+                if ctx.stopped() {
+                    return;
+                }
+            }
+        }
+    };
     let _ = socket.set_read_timeout(Some(TICK));
     let beacon = lan::beacon(&ctx.keys, &ctx.device, tcp_port);
     let mut last_sent: Option<Instant> = None;
@@ -690,7 +703,7 @@ fn nap(ctx: &Context, long: Duration, wake_on_touch: bool) {
 mod tests {
     use super::*;
     use crate::relay::test_support;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, UdpSocket};
 
     struct Dir(PathBuf);
 
@@ -713,14 +726,7 @@ mod tests {
     }
 
     fn free_port() -> u16 {
-        // 同一个端口号 UDP 和 TCP 都要能用
-        loop {
-            let tcp = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-            let port = tcp.local_addr().unwrap().port();
-            if UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).is_ok() {
-                return port;
-            }
-        }
+        crate::lan::test_port()
     }
 
     /// 一台配好对的「设备」：状态文件里是同一把组密钥。
@@ -808,6 +814,53 @@ mod tests {
         assert!(sa.to_json().contains("\"lan_peers\":1"));
         a.shutdown();
         b.shutdown();
+    }
+
+    #[test]
+    fn empty_clipboard_at_start_does_not_swallow_the_first_copy() {
+        let dir = Dir::new("empty");
+        let (a, b) = lan_pair(&dir, [9u8; 32], [9u8; 32]);
+        wait_for(|| (a.status().lan_peers == 1 && b.status().lan_peers == 1).then_some(()))
+            .expect("两台设备没找到彼此");
+        // 刚开机还没复制过东西：外壳报的是空串，基准就是「空」
+        assert!(!a.observe(""));
+        assert!(!a.observe(""));
+        assert!(a.observe("开机后第一次复制的"), "第一次复制的不该被当成基准");
+        assert_eq!(wait_for(|| b.poll()).unwrap().text, "开机后第一次复制的");
+        // 清空剪贴板不发；清空以后再复制同一段是新的一次复制
+        assert!(!a.observe(""));
+        assert!(a.observe("开机后第一次复制的"));
+        assert_eq!(wait_for(|| b.poll()).unwrap().text, "开机后第一次复制的");
+        a.shutdown();
+        b.shutdown();
+    }
+
+    #[test]
+    fn discovery_port_busy_at_start_is_retried() {
+        let dir = Dir::new("busy");
+        let mut a = device(&dir, "甲", [7u8; 32]);
+        let mut b = device(&dir, "乙", [7u8; 32]);
+        a.extra_targets = vec![local(b.lan_port)];
+        b.extra_targets = vec![local(a.lan_port)];
+        // 别的程序正占着乙的发现端口（没开端口复用，我们绑不上）
+        let squatter = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, b.lan_port)).unwrap();
+        let (sa, sb) = (Service::new(), Service::new());
+        sa.configure(a);
+        sb.configure(b);
+        let error = wait_for(|| sb.status().lan_error).expect("端口被占着应该报出来");
+        assert!(error.contains("打不开"), "{error}");
+        assert_eq!(sb.status().lan_peers, 0);
+        // 它走了以后自己恢复
+        drop(squatter);
+        wait_for(|| {
+            (sb.status().lan_error.is_none()
+                && sa.status().lan_peers == 1
+                && sb.status().lan_peers == 1)
+                .then_some(())
+        })
+        .expect("端口空出来以后没恢复");
+        sa.shutdown();
+        sb.shutdown();
     }
 
     #[test]

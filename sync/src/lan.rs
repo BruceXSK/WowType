@@ -337,6 +337,23 @@ pub fn local_ip() -> Option<IpAddr> {
     socket.local_addr().ok().map(|a| a.ip())
 }
 
+/// 测试用：挑一个 UDP、TCP 都空着的端口。不让系统挑（那样拿到的在临时端口范围里，挑完到真去绑之间
+/// 会被并行的别的测试、curl、node 的连接占走），从这个范围下面按序取号，每个进程从不同的地方起。
+#[cfg(test)]
+pub(crate) fn test_port() -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    loop {
+        let step = NEXT.fetch_add(1, Ordering::SeqCst);
+        let port = 20000 + ((std::process::id() as u16).wrapping_mul(7).wrapping_add(step) % 10000);
+        let free = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok()
+            && UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok();
+        if free {
+            return port;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

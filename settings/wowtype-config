@@ -3470,6 +3470,10 @@ def sync_command(command, values, *more):
     relay = values.get("ClipboardSyncRelayUrl", "").strip()
     if relay:
         args += ["--relay", relay, "--relay-key-file", SYNC_RELAY_KEY_FILE]
+    # 测试、排查用：加入时不靠广播找，直接连这个 地址:端口（广播被防火墙挡了的时候）
+    host = os.environ.get("WOWTYPE_SYNC_PAIR_HOST")
+    if command == "pair-join" and host:
+        args += ["--host", host]
     return args
 
 
@@ -6577,6 +6581,7 @@ class SettingsWindow(Adw.ApplicationWindow):
         group.add(more)
         self.sync_more = more
         self.sync_host = None       # 正在显示配对码时的 wowtype-sync 进程
+        self.sync_host_info = None  # 它打出来的（配对码, 另一台可以直接连的地址）
         self.sync_busy = False      # 正在加入 / 测试
         self.sync_token_source = 0
         self.refresh_sync()
@@ -6652,6 +6657,7 @@ class SettingsWindow(Adw.ApplicationWindow):
                 word, _, rest = line.strip().partition(" ")
                 if word == "code":
                     code = rest.split()[0]
+                    self.sync_host_info = (code, (rest.split() + [""] * 3)[2])
                     GLib.idle_add(self.refresh_sync,
                                   f"配对码 {code[:3]} {code[3:]}：在另一台设备的 WowType 设置里输入，5 分钟内有效")
             process.wait()
@@ -6661,6 +6667,7 @@ class SettingsWindow(Adw.ApplicationWindow):
     def sync_host_done(self, process, output):
         if self.sync_host is process:
             self.sync_host = None
+            self.sync_host_info = None
         ok, text = sync_result(output)
         if ok:
             log("跨设备复制粘贴：配对成功")

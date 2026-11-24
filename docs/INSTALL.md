@@ -213,7 +213,7 @@ sudo cmake --install build
 CMake 使用 Fcitx 5 导出的安装路径：Debian / Ubuntu 通常为 `/usr/lib/<multiarch>/fcitx5`，
 Arch 为 `/usr/lib/fcitx5`，Fedora / openSUSE 为 `/usr/lib64/fcitx5`。
 可用 `pkg-config --variable=libdir Fcitx5Core` 查看本机库目录。
-设置界面、输入法注册文件、简繁映射表、自检工具（`wowtype-check`、`wowtype-show`）和第 2 节生成的
+设置界面、输入法注册文件、简繁映射表、自检工具（`wowtype-check`、`wowtype-show`）、跨设备复制粘贴的配对工具（`wowtype-sync`）和第 2 节生成的
 `dist/data` 里的词库、英文词表、语言模型、五笔码表都由 `cmake --install` 装好（装在 `/usr/share/wowtype/`），
 不用再往用户目录拷文件。以后更新数据：重新跑第 2 节的脚本，再 `sudo cmake --install build`。
 数据放在别处时加 `-DWOWTYPE_DATA_DIR=<目录>`。
@@ -430,7 +430,7 @@ deb、Arch 和 Fedora 原生安装包可使用设置界面的更新页；它只�
 
 ```bash
 sudo xargs -d '\n' -r rm -v -- < build/install_manifest.txt
-sudo rm -f /usr/bin/wowtype-check /usr/bin/wowtype-show
+sudo rm -f /usr/bin/wowtype-check /usr/bin/wowtype-show /usr/bin/wowtype-sync
 ```
 
 如果使用 `build-text` 等其他构建目录，应使用对应的 `install_manifest.txt`。

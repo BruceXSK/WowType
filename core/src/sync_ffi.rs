@@ -193,6 +193,8 @@ mod tests {
         }
     }
 
+    // 两个句柄在本机走局域网。Windows 的外壳还没接同步，那边不跑
+    #[cfg(unix)]
     #[test]
     fn two_handles_sync_and_fill_the_clipboard_history() {
         let _clipboard = crate::clipboard::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -208,8 +210,14 @@ mod tests {
             let mut state = wowtype_sync::store::State::fresh();
             state.group_key = Some([6u8; 32]);
             state.save(&state_file).unwrap();
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            ports.push(listener.local_addr().unwrap().port());
+            // 不用系统挑的临时端口（挑完到真去绑之间会被并行的别的测试占走）：从临时端口范围下面找空的
+            let mut port = 30000 + (std::process::id() as u16 % 2000) + ports.len() as u16 * 7;
+            while std::net::TcpListener::bind(("0.0.0.0", port)).is_err()
+                || std::net::UdpSocket::bind(("0.0.0.0", port)).is_err()
+            {
+                port += 1;
+            }
+            ports.push(port);
             services.push(state_file);
         }
         unsafe {

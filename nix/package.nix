@@ -95,7 +95,7 @@ stdenv.mkDerivation {
 
   postInstall = ''
     rm -rf "$out/include"
-    for bin in wowtype-check wowtype-show; do
+    for bin in wowtype-check wowtype-show wowtype-sync; do
       install -Dm755 "../target/release/$bin" "$out/bin/$bin"
     done
 

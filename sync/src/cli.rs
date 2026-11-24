@@ -120,6 +120,11 @@ pub fn pair_host(
         .and_then(|(listener, _)| listener.local_addr().ok())
         .map(|a| a.port());
     let address = port.and_then(|port| lan::local_ip().map(|ip| SocketAddr::new(ip, port)));
+    // 中转服务信箱里上一次没走完的留言先清掉。要在公布配对码之前清：公布以后加入的一方随时会来留言，
+    // 那时候再清会把它的请求一起清掉。清不掉（中转服务连不上）不要紧，局域网那条路照常
+    if let Some(relay) = &options.relay {
+        let _ = relay.clear_mail();
+    }
     on_code(&code.lock().unwrap().code.clone(), address);
 
     let serve = |channel: &mut dyn Channel, hello: &[u8]| {
@@ -137,8 +142,6 @@ pub fn pair_host(
         if let Some(relay) = &options.relay {
             let (serve, finished, canceller) = (&serve, &finished, &canceller);
             scope.spawn(move || {
-                // 上一次没走完的留言清掉
-                let _ = relay.clear_mail();
                 let mut channel = MailChannel::host(relay, Some(canceller));
                 while !finished() {
                     match channel.recv(Duration::from_secs(20)) {
@@ -630,10 +633,7 @@ mod tests {
         state.save(&a).unwrap();
         state.device_id = [7u8; 8];
         state.save(&b).unwrap();
-        let port = {
-            let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-            probe.local_addr().unwrap().port()
-        };
+        let port = lan::test_port();
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let sink = Arc::clone(&lines);
         let listening = std::thread::spawn(move || {
