@@ -1,0 +1,11 @@
+// WowType 跨设备剪贴板的中转服务。部署：见同目录的 README.md。
+{
+  "name": "wowtype-sync-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-01-01",
+  "durable_objects": {
+    "bindings": [{ "name": "RELAY", "class_name": "Relay" }]
+  },
+  // 免费套餐只能用 SQLite 的 Durable Object
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Relay"] }]
+}
