@@ -55,3 +55,64 @@ pub unsafe extern "C" fn wowtype_sync_from(_sync: *const WowtypeSync) -> *const 
 pub unsafe extern "C" fn wowtype_sync_status(_sync: *mut WowtypeSync) -> *const c_char {
     EMPTY_JSON.as_ptr() as *const c_char
 }
+
+// ---- 配对：都是「没有这个功能」
+
+pub struct WowtypeSyncPairing;
+
+/// 和头文件里的 `WowtypeSyncPairConfig` 一样。
+#[repr(C)]
+pub struct WowtypeSyncPairConfig {
+    pub size: u32,
+    pub state_file: *const c_char,
+    pub device_name: *const c_char,
+    pub lan: c_int,
+    pub relay_url: *const c_char,
+    pub relay_key_file: *const c_char,
+}
+
+static NOT_BUILT: &[u8] = "这个版本没带跨设备复制粘贴\0".as_bytes();
+
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_pair_host(
+    _config: *const WowtypeSyncPairConfig,
+) -> *mut WowtypeSyncPairing {
+    std::ptr::null_mut()
+}
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_pair_join(
+    _config: *const WowtypeSyncPairConfig,
+    _code: *const c_char,
+) -> *mut WowtypeSyncPairing {
+    std::ptr::null_mut()
+}
+/// 3 = 没配上（WOWTYPE_SYNC_PAIR_FAILED）。
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_pairing_state(_pairing: *mut WowtypeSyncPairing) -> c_int {
+    3
+}
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_pairing_text(
+    _pairing: *mut WowtypeSyncPairing,
+) -> *const c_char {
+    NOT_BUILT.as_ptr() as *const c_char
+}
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_pairing_free(_pairing: *mut WowtypeSyncPairing) {}
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_unpair(_state_file: *const c_char) -> c_int {
+    -1
+}
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_paired(_state_file: *const c_char) -> *const c_char {
+    static EMPTY: &[u8] = b"{\"paired\":false,\"devices\":[]}\0";
+    EMPTY.as_ptr() as *const c_char
+}
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_ping(
+    _relay_url: *const c_char,
+    _relay_key_file: *const c_char,
+) -> c_int {
+    crate::ffi::set_last_error("这个版本没带跨设备复制粘贴");
+    -1
+}

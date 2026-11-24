@@ -798,6 +798,44 @@ const char *wowtype_sync_from(const WowtypeSync *sync);
  * 返回的指针到下一次 wowtype_sync_status 之前有效。 */
 const char *wowtype_sync_status(WowtypeSync *sync);
 
+/* 配对（设置界面用，和 wowtype-sync 命令行是同一套）。结果写在配对文件里，输入法那边的 WowtypeSync
+ * 盯着这个文件，自己跟上。主持、加入都在核心自己的线程里做，界面定时看 wowtype_sync_pairing_state。 */
+typedef struct WowtypeSyncPairConfig {
+    uint32_t size;              /* sizeof(WowtypeSyncPairConfig) */
+    const char *state_file;     /* 配对文件 */
+    const char *device_name;    /* 这台设备叫什么 */
+    int lan;                    /* 在局域网里配 */
+    const char *relay_url;      /* 经中转服务配；NULL/空串不用 */
+    const char *relay_key_file;
+} WowtypeSyncPairConfig;
+
+typedef struct WowtypeSyncPairing WowtypeSyncPairing;
+
+enum {
+    WOWTYPE_SYNC_PAIR_STARTING = 0, /* 还在准备（主持）、正在找另一台（加入） */
+    WOWTYPE_SYNC_PAIR_WAITING = 1,  /* 主持：配对码有了，等另一台输入；_text 是 6 位配对码 */
+    WOWTYPE_SYNC_PAIR_DONE = 2,     /* 配好了；_text 是另一台的名字 */
+    WOWTYPE_SYNC_PAIR_FAILED = 3,   /* 没配上；_text 是给用户看的原因 */
+};
+
+/* 主持：生成配对码，等另一台设备输入（5 分钟内有效）。 */
+WowtypeSyncPairing *wowtype_sync_pair_host(const WowtypeSyncPairConfig *config);
+/* 加入：拿另一台设备上显示的配对码去配。 */
+WowtypeSyncPairing *wowtype_sync_pair_join(const WowtypeSyncPairConfig *config, const char *code);
+int wowtype_sync_pairing_state(WowtypeSyncPairing *pairing);
+/* 见上面各状态。返回的指针到下一次 wowtype_sync_pairing_text 之前有效。 */
+const char *wowtype_sync_pairing_text(WowtypeSyncPairing *pairing);
+/* 还在等的话取消（主持的不再认这个配对码），然后释放。 */
+void wowtype_sync_pairing_free(WowtypeSyncPairing *pairing);
+/* 这台设备取消配对（忘掉组密钥和别的设备；别的设备之间不受影响）。返回 0 成功，-1 失败。 */
+int wowtype_sync_unpair(const char *state_file);
+/* 配对文件里有什么，一行 JSON：{"paired":true,"devices":["名字",…]}（不含密钥）。
+ * 返回的指针在这个线程下一次调 wowtype_sync_paired 之前有效。 */
+const char *wowtype_sync_paired(const char *state_file);
+/* 测试中转服务：地址对不对、口令对不对。要连网，会等到有结果（最多十几秒），放后台线程里调。
+ * 返回 0 能用；-1 不能用，原因在 wowtype_last_error。 */
+int wowtype_sync_ping(const char *relay_url, const char *relay_key_file);
+
 #ifdef __cplusplus
 }
 #endif

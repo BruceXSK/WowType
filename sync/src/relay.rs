@@ -154,6 +154,12 @@ impl Relay {
             return Err(RelayError::Cancelled);
         }
         let mut command = Command::new("curl");
+        #[cfg(windows)]
+        {
+            // 调用方是窗口程序（设置窗口、后台同步进程）：不加这个会闪一个黑框
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
         command
             .args(["-sS", "-K", "-"])
             .stdin(Stdio::piped())

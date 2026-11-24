@@ -8,7 +8,12 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
+use wowtype_sync::cli::{pair_host, pair_join, PairOptions};
+use wowtype_sync::relay::Relay;
+use wowtype_sync::store::read_secret_line;
 use wowtype_sync::{Config, Service};
 
 pub struct WowtypeSync {
@@ -161,6 +166,206 @@ pub unsafe extern "C" fn wowtype_sync_status(sync: *mut WowtypeSync) -> *const c
     sync.status.as_ptr()
 }
 
+// ---- 配对
+
+/// 和头文件里的 `WowtypeSyncPairConfig` 一样。
+#[repr(C)]
+pub struct WowtypeSyncPairConfig {
+    pub size: u32,
+    pub state_file: *const c_char,
+    pub device_name: *const c_char,
+    pub lan: c_int,
+    pub relay_url: *const c_char,
+    pub relay_key_file: *const c_char,
+}
+
+pub const SYNC_PAIR_STARTING: c_int = 0;
+pub const SYNC_PAIR_WAITING: c_int = 1;
+pub const SYNC_PAIR_DONE: c_int = 2;
+pub const SYNC_PAIR_FAILED: c_int = 3;
+
+pub struct WowtypeSyncPairing {
+    progress: Arc<Mutex<(c_int, String)>>,
+    cancel: Arc<AtomicBool>,
+    text: CString,
+}
+
+/// 读配对的设置。地址、口令有问题时返回给用户看的原因。
+unsafe fn pair_options(config: *const WowtypeSyncPairConfig) -> Result<PairOptions, String> {
+    let raw = config
+        .as_ref()
+        .filter(|c| c.size as usize >= std::mem::size_of::<WowtypeSyncPairConfig>())
+        .ok_or("配对的设置不对")?;
+    let state_file = arg(raw.state_file);
+    if state_file.is_empty() {
+        return Err("没有指明配对文件".to_string());
+    }
+    let mut options = PairOptions::new(crate::llama::expand_home(&state_file), &arg(raw.device_name));
+    options.lan = raw.lan != 0;
+    options.relay = relay_from(&arg(raw.relay_url), &arg(raw.relay_key_file))?;
+    test_knobs_for_pairing(&mut options);
+    Ok(options)
+}
+
+/// 填了地址才用中转服务；填了地址没有口令、地址不对都说清楚。
+fn relay_from(url: &str, key_file: &str) -> Result<Option<Relay>, String> {
+    if url.is_empty() {
+        return Ok(None);
+    }
+    let token = (!key_file.is_empty())
+        .then(|| read_secret_line(&crate::llama::expand_home(key_file)))
+        .flatten()
+        .ok_or("还没有填中转服务的访问口令")?;
+    Relay::new(url, &token).map(Some).map_err(|e| e.to_string())
+}
+
+/// 测试用：`WOWTYPE_SYNC_PAIR_HOST`（`地址:端口`）加入时不靠广播找、直接连它。
+fn test_knobs_for_pairing(options: &mut PairOptions) {
+    if let Some(host) = std::env::var("WOWTYPE_SYNC_PAIR_HOST")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+    {
+        options.host = Some(host);
+    }
+}
+
+fn pairing(
+    options: Result<PairOptions, String>,
+    work: impl FnOnce(PairOptions, &AtomicBool, &Mutex<(c_int, String)>) -> Result<String, String>
+        + Send
+        + 'static,
+) -> *mut WowtypeSyncPairing {
+    let progress = Arc::new(Mutex::new((SYNC_PAIR_STARTING, String::new())));
+    let cancel = Arc::new(AtomicBool::new(false));
+    match options {
+        Err(why) => *progress.lock().unwrap() = (SYNC_PAIR_FAILED, why),
+        Ok(options) => {
+            let (shared, stop) = (Arc::clone(&progress), Arc::clone(&cancel));
+            let spawned = std::thread::Builder::new()
+                .name("wowtype-sync-pair".to_string())
+                .spawn(move || {
+                    let outcome = work(options, &stop, &shared);
+                    *shared.lock().unwrap() = match outcome {
+                        Ok(name) => (SYNC_PAIR_DONE, name),
+                        Err(why) => (SYNC_PAIR_FAILED, why),
+                    };
+                });
+            if spawned.is_err() {
+                *progress.lock().unwrap() = (SYNC_PAIR_FAILED, "起不来线程".to_string());
+            }
+        }
+    }
+    Box::into_raw(Box::new(WowtypeSyncPairing {
+        progress,
+        cancel,
+        text: CString::default(),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_pair_host(
+    config: *const WowtypeSyncPairConfig,
+) -> *mut WowtypeSyncPairing {
+    pairing(pair_options(config), |options, cancel, progress| {
+        pair_host(&options, cancel, &mut |code, _address| {
+            *progress.lock().unwrap() = (SYNC_PAIR_WAITING, code.to_string());
+        })
+        .map(|device| device.name)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_pair_join(
+    config: *const WowtypeSyncPairConfig,
+    code: *const c_char,
+) -> *mut WowtypeSyncPairing {
+    let code = arg(code);
+    pairing(pair_options(config), move |options, _cancel, _progress| {
+        pair_join(&options, &code).map(|device| device.name)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_pairing_state(pairing: *mut WowtypeSyncPairing) -> c_int {
+    match pairing.as_ref() {
+        Some(pairing) => pairing.progress.lock().unwrap().0,
+        None => SYNC_PAIR_FAILED,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_pairing_text(
+    pairing: *mut WowtypeSyncPairing,
+) -> *const c_char {
+    static EMPTY: [u8; 1] = [0];
+    let Some(pairing) = pairing.as_mut() else {
+        return EMPTY.as_ptr() as *const c_char;
+    };
+    let text = pairing.progress.lock().unwrap().1.clone();
+    pairing.text = c_string(&text);
+    pairing.text.as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_pairing_free(pairing: *mut WowtypeSyncPairing) {
+    if !pairing.is_null() {
+        let pairing = Box::from_raw(pairing);
+        // 还在等的线程看到这个就停（配成了才写配对文件，取消不留痕迹）
+        pairing.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_unpair(state_file: *const c_char) -> c_int {
+    let state_file = arg(state_file);
+    if state_file.is_empty() {
+        return -1;
+    }
+    match wowtype_sync::cli::unpair(&crate::llama::expand_home(&state_file)) {
+        Ok(()) => 0,
+        Err(why) => {
+            crate::ffi::set_last_error(why);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_paired(state_file: *const c_char) -> *const c_char {
+    thread_local! {
+        static BUFFER: std::cell::RefCell<CString> = std::cell::RefCell::new(CString::default());
+    }
+    let state_file = arg(state_file);
+    let json = if state_file.is_empty() {
+        r#"{"paired":false,"devices":[]}"#.to_string()
+    } else {
+        wowtype_sync::cli::status_json(&crate::llama::expand_home(&state_file))
+    };
+    BUFFER.with(|buffer| {
+        *buffer.borrow_mut() = c_string(&json);
+        buffer.borrow().as_ptr()
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_sync_ping(
+    relay_url: *const c_char,
+    relay_key_file: *const c_char,
+) -> c_int {
+    let outcome = match relay_from(&arg(relay_url), &arg(relay_key_file)) {
+        Ok(Some(relay)) => relay.ping().map_err(|e| e.to_string()),
+        Ok(None) => Err("还没有填中转服务的地址".to_string()),
+        Err(why) => Err(why),
+    };
+    match outcome {
+        Ok(()) => 0,
+        Err(why) => {
+            crate::ffi::set_last_error(why);
+            -1
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +477,106 @@ mod tests {
             }
         }
         crate::clipboard::clear();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 等配对走到某个状态之外，返回（状态, 文字）。
+    unsafe fn settle(pairing: *mut WowtypeSyncPairing, while_in: &[c_int]) -> (c_int, String) {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            let state = wowtype_sync_pairing_state(pairing);
+            if !while_in.contains(&state) || Instant::now() > deadline {
+                let text = CStr::from_ptr(wowtype_sync_pairing_text(pairing))
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                return (state, text);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    // 两台设备用 C 接口在本机配对（和 Linux 设置界面调命令行是同一套代码）
+    #[cfg(unix)]
+    #[test]
+    fn pair_through_the_c_interface() {
+        let dir = std::env::temp_dir().join(format!("wowtype-sync-ffi-pair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (c(dir.join("a.json").to_str().unwrap()), c(dir.join("b.json").to_str().unwrap()));
+        let (name_a, name_b) = (c("书房"), c("客厅"));
+        let config = |state: &CString, name: &CString| WowtypeSyncPairConfig {
+            size: std::mem::size_of::<WowtypeSyncPairConfig>() as u32,
+            state_file: state.as_ptr(),
+            device_name: name.as_ptr(),
+            lan: 1,
+            relay_url: std::ptr::null(),
+            relay_key_file: std::ptr::null(),
+        };
+        unsafe {
+            let paired = |state: &CString| {
+                CStr::from_ptr(wowtype_sync_paired(state.as_ptr())).to_str().unwrap().to_string()
+            };
+            assert!(paired(&a).contains("\"paired\":false"));
+            // 取消：没配成不留下组密钥
+            let host = wowtype_sync_pair_host(&config(&a, &name_a));
+            let (state, code) = settle(host, &[SYNC_PAIR_STARTING]);
+            assert_eq!(state, SYNC_PAIR_WAITING);
+            assert!(code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()), "{code}");
+            wowtype_sync_pairing_free(host);
+            std::thread::sleep(Duration::from_millis(400));
+            assert!(paired(&a).contains("\"paired\":false"));
+
+            // 没人主持时加入：说得出原因
+            let join = wowtype_sync_pair_join(&config(&b, &name_b), c("12345").as_ptr());
+            assert_eq!(settle(join, &[SYNC_PAIR_STARTING]), (SYNC_PAIR_FAILED, "配对码是 6 位数字".to_string()));
+            wowtype_sync_pairing_free(join);
+
+            // 真配一次。主持的在局域网上广播；这里靠广播找（同一台机器收得到自己的广播）
+            let host = wowtype_sync_pair_host(&config(&a, &name_a));
+            let (_, code) = settle(host, &[SYNC_PAIR_STARTING]);
+            let join = wowtype_sync_pair_join(&config(&b, &name_b), c(&code).as_ptr());
+            let joined = settle(join, &[SYNC_PAIR_STARTING]);
+            if joined.0 == SYNC_PAIR_FAILED && joined.1.contains("没找到") {
+                // 没有能广播的网卡（有的 CI 容器）：这一步跳过
+                eprintln!("skip：这台机器上广播收不到自己（{}）", joined.1);
+                wowtype_sync_pairing_free(join);
+                wowtype_sync_pairing_free(host);
+            } else {
+                assert_eq!(joined, (SYNC_PAIR_DONE, "书房".to_string()));
+                assert_eq!(settle(host, &[SYNC_PAIR_WAITING]), (SYNC_PAIR_DONE, "客厅".to_string()));
+                wowtype_sync_pairing_free(join);
+                wowtype_sync_pairing_free(host);
+                assert!(paired(&a).contains("\"paired\":true") && paired(&a).contains("客厅"));
+                assert!(paired(&b).contains("书房"));
+                assert!(!paired(&a).contains("group_key"));
+                assert_eq!(wowtype_sync_unpair(b.as_ptr()), 0);
+                assert!(paired(&b).contains("\"paired\":false"));
+                assert!(paired(&a).contains("\"paired\":true"), "取消配对只动自己");
+            }
+
+            // 设置不对、空指针
+            let bad = wowtype_sync_pair_host(std::ptr::null());
+            assert_eq!(wowtype_sync_pairing_state(bad), SYNC_PAIR_FAILED);
+            wowtype_sync_pairing_free(bad);
+            wowtype_sync_pairing_free(std::ptr::null_mut());
+            assert_eq!(wowtype_sync_pairing_state(std::ptr::null_mut()), SYNC_PAIR_FAILED);
+            assert_eq!(wowtype_sync_unpair(std::ptr::null()), -1);
+            // 中转服务：没填地址、地址不对、没口令，都不联网就说得出原因
+            assert_eq!(wowtype_sync_ping(std::ptr::null(), std::ptr::null()), -1);
+            let key = dir.join("k");
+            std::fs::write(&key, "t\n").unwrap();
+            assert_eq!(
+                wowtype_sync_ping(c("http://relay.example.com").as_ptr(), c(key.to_str().unwrap()).as_ptr()),
+                -1
+            );
+            let why = CStr::from_ptr(crate::ffi::wowtype_last_error()).to_str().unwrap();
+            assert!(why.contains("https://"), "{why}");
+            assert_eq!(
+                wowtype_sync_ping(c("https://relay.example.com").as_ptr(), c("/nonexistent/key").as_ptr()),
+                -1
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
