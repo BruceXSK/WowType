@@ -7226,6 +7226,9 @@ class SettingsWindow(Adw.ApplicationWindow):
         group.add(self.local_model_row)
         self.local_cancel = None
         self.local_stage = "model"
+        # 新模型已经在了、上一代的还留着（上次升级到一半关了窗口）：补删，腾出 1 GB 多
+        if not self.values["TranslateLocalModel"] and (freed := remove_legacy_model()):
+            log(f"删掉上一代的本地翻译模型，空出 {human_size(freed)}")
 
         # 一般用不着的放进折叠项
         more = Adw.ExpanderRow(title="更多选项")
