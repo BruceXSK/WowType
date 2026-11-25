@@ -256,6 +256,17 @@ public struct WowtypeConfig: Equatable {
     public var toolbar = true
     /// 记录剪贴板历史（只在内存里，最多 20 条）。默认关：可能把复制的密码也记下来
     public var clipboardHistory = false
+    /// 跨设备复制粘贴（docs/SYNC.md）：一台设备上复制的文字，在配过对的另一台上直接粘贴。默认关；
+    /// 配对在设置窗口里做，组密钥在数据目录的 sync.json，中转服务的访问口令在 sync-relay.key
+    public var clipboardSync = false
+    /// 同一个局域网里直接传
+    public var clipboardSyncLan = true
+    /// 自己部署的中转服务地址，留空不用
+    public var clipboardSyncRelayUrl = ""
+    /// 这台设备的名字，留空用电脑的名字
+    public var clipboardSyncDeviceName = ""
+    /// 收到的也放进系统剪贴板（能直接 Command+V）
+    public var clipboardSyncPaste = true
     /// 语音输入：按住 voiceKey 说话，松开出字（模型在设置窗口里下载）
     public var voice = true
     /// 语音键，fcitx5 键名：Alt_R（右 Option）、Control_R、F8…；留空不用
@@ -418,7 +429,9 @@ public struct WowtypeConfig: Equatable {
         "ShuangpinAbbrev", "WubiAutoCommit", "WubiHint", "ShiftToggle", "InitialMode", "WindowMode",
         "Traditional",
         "PunctuationStyle", "AutoPairPunct", "DateTime", "Calculator", "EmojiSuggest", "AutoSpace", "AutoSpaceLetters",
-        "AutoSpaceDigits", "Lexicon", "Toolbar", "ClipboardHistory", "Voice", "VoiceKey", "VoiceSilenceTimeout",
+        "AutoSpaceDigits", "Lexicon", "Toolbar", "ClipboardHistory",
+        "ClipboardSync", "ClipboardSyncLan", "ClipboardSyncRelayUrl", "ClipboardSyncDeviceName", "ClipboardSyncPaste",
+        "Voice", "VoiceKey", "VoiceSilenceTimeout",
         "VoiceCopy", "EmojiKey",
         "ToggleKey", "TranslateModeKey", "CheckUpdate", "BetaUpdates", "TypingStats", "SettingsTheme", "SettingsAccent",
         "Translate", "TranslateTarget", "TranslateBaseUrl", "TranslateModel", "TranslateFormal", "TranslateOneShot",
@@ -441,6 +454,8 @@ public struct WowtypeConfig: Equatable {
         "DateTime": \.dateTime, "Calculator": \.calculator, "EmojiSuggest": \.emojiSuggest,
         "AutoSpace": \.autoSpace, "AutoSpaceLetters": \.autoSpaceLetters, "AutoSpaceDigits": \.autoSpaceDigits,
         "Toolbar": \.toolbar, "ClipboardHistory": \.clipboardHistory, "Voice": \.voice, "VoiceCopy": \.voiceCopy,
+        "ClipboardSync": \.clipboardSync, "ClipboardSyncLan": \.clipboardSyncLan,
+        "ClipboardSyncPaste": \.clipboardSyncPaste,
         "Translate": \.translate, "TranslateFormal": \.translateFormal, "TranslateOneShot": \.translateOneShot,
         "TranslateLocal": \.translateLocal,
         "CheckUpdate": \.checkUpdate, "BetaUpdates": \.betaUpdates, "TypingStats": \.typingStats,
@@ -501,6 +516,8 @@ public struct WowtypeConfig: Equatable {
         case "TranslateTarget":
             if let v = matchName(value, WowtypeConfig.translateTargets) { translateTarget = v }
         case "TranslateBaseUrl": translateBaseUrl = value
+        case "ClipboardSyncRelayUrl": clipboardSyncRelayUrl = value
+        case "ClipboardSyncDeviceName": clipboardSyncDeviceName = value
         case "TranslateModel": translateModel = value
         case "TranslateLocalModel": translateLocalModel = value
         case "TranslateLlamaServer": translateLlamaServer = value
@@ -538,6 +555,8 @@ public struct WowtypeConfig: Equatable {
         case "SettingsAccent": return settingsAccent
         case "TranslateTarget": return translateTarget
         case "TranslateBaseUrl": return translateBaseUrl
+        case "ClipboardSyncRelayUrl": return clipboardSyncRelayUrl
+        case "ClipboardSyncDeviceName": return clipboardSyncDeviceName
         case "TranslateModel": return translateModel
         case "TranslateLocalModel": return translateLocalModel
         case "TranslateLlamaServer": return translateLlamaServer
@@ -772,6 +791,14 @@ public struct WowtypeConfig: Equatable {
         Toolbar=\(b(d.toolbar))
         # 工具栏里记剪贴板历史（只在内存里，最多 20 条）。可能把复制的密码也记下来，默认关
         ClipboardHistory=\(b(d.clipboardHistory))
+        # 跨设备复制粘贴：一台设备上复制的文字，在配过对的另一台上直接粘贴（配对在设置窗口「输入」页做）。
+        # 内容端到端加密；同一个局域网里直接传，不在一个局域网时走自己部署的中转服务（留空不用）
+        ClipboardSync=\(b(d.clipboardSync))
+        ClipboardSyncLan=\(b(d.clipboardSyncLan))
+        ClipboardSyncRelayUrl=
+        ClipboardSyncDeviceName=
+        # 收到的也放进系统剪贴板（能直接 Command+V）；关掉只出现在 v + 空格的「剪贴板」里
+        ClipboardSyncPaste=\(b(d.clipboardSyncPaste))
 
         # 语音输入：按住语音键说话，松开出字（点按一下也行，说完停一下自动结束）。模型在设置窗口「语音」页下载
         Voice=\(b(d.voice))

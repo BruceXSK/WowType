@@ -339,6 +339,8 @@ let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
 AppState.shared.loadEngineInBackground()
+// 跨设备复制粘贴只在输入法这个进程里收发（设置窗口是另一个进程，只管配对）
+AppState.shared.startClipboardSync()
 withExtendedLifetime(server) {
     app.run()
 }

@@ -16,7 +16,8 @@ TARGET_DIR=${WOWTYPE_MACOS_TARGET_DIR:-target/macos-novoice}
 OUT=$TARGET_DIR/harness
 mkdir -p "$OUT"
 
-cargo build --release -q -p wowtype-core --no-default-features --target-dir "$TARGET_DIR"
+# 带上 sync：跨设备复制粘贴那层 Swift 封装对着真的核心测（它是纯 Rust 的，不像语音要系统的音频库）
+cargo build --release -q -p wowtype-core --no-default-features --features sync --target-dir "$TARGET_DIR"
 LIBDIR=$TARGET_DIR/release
 
 if [[ "$(uname)" == Darwin ]]; then

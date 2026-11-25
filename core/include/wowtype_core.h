@@ -16,7 +16,7 @@
  * 删函数或改参数含义时升主版本。外壳启动时用 wowtype_abi_version() 比对主版本。
  * 规则见 docs/ABI.md。 */
 #define WOWTYPE_ABI_VERSION_MAJOR 1
-#define WOWTYPE_ABI_VERSION_MINOR 18
+#define WOWTYPE_ABI_VERSION_MINOR 19
 
 #ifdef __cplusplus
 extern "C" {
@@ -753,6 +753,88 @@ int wowtype_stats_clear(const char *path);
 
 /* 当前 Unix 毫秒。 */
 int64_t wowtype_stats_now_ms(void);
+
+/* ---- 跨设备剪贴板（ABI 1.19 起） ----
+ *
+ * 一台设备上复制的文字，在配过对的另一台设备上可以直接粘贴。内容用配对时换来的组密钥端到端加密，
+ * 走局域网直连和 / 或用户自己部署的中转服务（relay/cloudflare）。配对由设置界面做（wowtype-sync 命令行），
+ * 结果写在配对文件里；这里只管同步，盯着配对文件，变了自己跟上。
+ *
+ * 线程都是核心自己的，下面的函数都不阻塞。外壳要做的：
+ *   1. 设置变了调 wowtype_sync_configure；
+ *   2. 定时（一秒左右）把本机剪贴板现在的文字交给 wowtype_sync_observe（密码框里、标了「机密」的不交）；
+ *      configure 以后第一次交的只当基准，不发——所以剪贴板是空的也要交（交空串），不然开机以后
+ *      第一次复制的会被当成基准吞掉；
+ *   3. 定时调 wowtype_sync_poll 取别的设备复制过来的，想让 Ctrl+V 也能贴就写进系统剪贴板
+ *      （写进去以后 observe 报回来的同一段文字不会再往回发）；
+ *   4. 有按键、切到输入法时调 wowtype_sync_touch（最近没人用就不一直挂着中转服务的连接）。
+ * 核心不带 sync 特性编译时 wowtype_sync_new 返回 NULL，其余什么也不做。 */
+typedef struct WowtypeSync WowtypeSync;
+
+typedef struct WowtypeSyncConfig {
+    uint32_t size;              /* sizeof(WowtypeSyncConfig)；以后只在末尾加字段 */
+    int enabled;                /* 0 = 关（停掉所有线程） */
+    int lan;                    /* 局域网直连 */
+    const char *relay_url;      /* 中转服务的地址；NULL/空串不用 */
+    const char *relay_key_file; /* 放中转服务访问口令的文件（一行）；NULL/空串没有 */
+    const char *state_file;     /* 配对文件（设备编号、组密钥、配过对的设备） */
+    const char *device_name;    /* 这台设备叫什么，显示在别的设备上 */
+} WowtypeSyncConfig;
+
+WowtypeSync *wowtype_sync_new(void);
+void wowtype_sync_free(WowtypeSync *sync);
+void wowtype_sync_configure(WowtypeSync *sync, const WowtypeSyncConfig *config);
+/* 本机剪贴板现在是 text。返回 1 = 发给别的设备了，0 = 没发（没变、是别的设备刚传来的、空白、
+ * 超过 16 KB、没打开或没配对）。 */
+int wowtype_sync_observe(WowtypeSync *sync, const char *text);
+void wowtype_sync_touch(WowtypeSync *sync);
+/* 取一条别的设备复制过来的文字，同时记进剪贴板历史（v + 空格的「剪贴板」里看得到）；没有返回 NULL。
+ * 返回的指针到下一次 wowtype_sync_poll 之前有效。 */
+const char *wowtype_sync_poll(WowtypeSync *sync);
+/* 上一次 wowtype_sync_poll 取到的那条是哪台设备复制的（设备自己起的名字，可能是空串）。 */
+const char *wowtype_sync_from(const WowtypeSync *sync);
+/* 现在的状态，一行 JSON：enabled、paired、devices、lan、lan_port、lan_peers、lan_error、
+ * relay（off / no-token / connecting / ok / error）、relay_error、sent、received、error。
+ * 返回的指针到下一次 wowtype_sync_status 之前有效。 */
+const char *wowtype_sync_status(WowtypeSync *sync);
+
+/* 配对（设置界面用，和 wowtype-sync 命令行是同一套）。结果写在配对文件里，输入法那边的 WowtypeSync
+ * 盯着这个文件，自己跟上。主持、加入都在核心自己的线程里做，界面定时看 wowtype_sync_pairing_state。 */
+typedef struct WowtypeSyncPairConfig {
+    uint32_t size;              /* sizeof(WowtypeSyncPairConfig) */
+    const char *state_file;     /* 配对文件 */
+    const char *device_name;    /* 这台设备叫什么 */
+    int lan;                    /* 在局域网里配 */
+    const char *relay_url;      /* 经中转服务配；NULL/空串不用 */
+    const char *relay_key_file;
+} WowtypeSyncPairConfig;
+
+typedef struct WowtypeSyncPairing WowtypeSyncPairing;
+
+enum {
+    WOWTYPE_SYNC_PAIR_STARTING = 0, /* 还在准备（主持）、正在找另一台（加入） */
+    WOWTYPE_SYNC_PAIR_WAITING = 1,  /* 主持：配对码有了，等另一台输入；_text 是 6 位配对码 */
+    WOWTYPE_SYNC_PAIR_DONE = 2,     /* 配好了；_text 是另一台的名字 */
+    WOWTYPE_SYNC_PAIR_FAILED = 3,   /* 没配上；_text 是给用户看的原因 */
+};
+
+/* 主持：生成配对码，等另一台设备输入（5 分钟内有效）。 */
+WowtypeSyncPairing *wowtype_sync_pair_host(const WowtypeSyncPairConfig *config);
+/* 加入：拿另一台设备上显示的配对码去配。 */
+WowtypeSyncPairing *wowtype_sync_pair_join(const WowtypeSyncPairConfig *config, const char *code);
+int wowtype_sync_pairing_state(WowtypeSyncPairing *pairing);
+/* 见上面各状态。返回的指针到下一次 wowtype_sync_pairing_text 之前有效。 */
+const char *wowtype_sync_pairing_text(WowtypeSyncPairing *pairing);
+/* 还在等的话取消（主持的不再认这个配对码），然后释放。 */
+void wowtype_sync_pairing_free(WowtypeSyncPairing *pairing);
+/* 这台设备取消配对（忘掉组密钥和别的设备；别的设备之间不受影响）。返回 0 成功，-1 失败。 */
+int wowtype_sync_unpair(const char *state_file);
+/* 配对文件里有什么，一行 JSON：{"paired":true,"devices":["名字",…]}（不含密钥）。
+ * 返回的指针在这个线程下一次调 wowtype_sync_paired 之前有效。 */
+const char *wowtype_sync_paired(const char *state_file);
+/* 测试中转服务：地址对不对、口令对不对。要连网，会等到有结果（最多十几秒），放后台线程里调。
+ * 返回 0 能用；-1 不能用，原因在 wowtype_last_error。 */
+int wowtype_sync_ping(const char *relay_url, const char *relay_key_file);
 
 #ifdef __cplusplus
 }

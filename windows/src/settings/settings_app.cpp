@@ -37,6 +37,7 @@
 #include "app_update.h"
 #include "config.h"
 #include "custom_words.h"
+#include "json.h"
 #include "look.h"
 #include "stats_view.h"
 #include "translate_engine.h"
@@ -47,6 +48,11 @@
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 using namespace wowtype;
+
+// 跨设备复制粘贴的后台进程（wowtype-settings.exe --sync-agent），定义在文件后面
+void setSyncAgent(bool enabled);
+void closeSyncAgent();
+int runSyncAgent(HINSTANCE instance);
 
 namespace {
 
@@ -94,6 +100,18 @@ constexpr int kIdCustomUrl = 125;
 constexpr int kIdCustomModel = 126;
 constexpr int kIdCustomTest = 127;
 constexpr UINT_PTR kTimerTranslateTest = 1;
+// 跨设备复制粘贴（docs/SYNC.md）
+constexpr int kIdSyncHost = 128;
+constexpr int kIdSyncCode = 129;
+constexpr int kIdSyncJoin = 130;
+constexpr int kIdSyncUnpair = 131;
+constexpr int kIdSyncToken = 132;
+constexpr int kIdSyncPing = 133;
+constexpr UINT_PTR kTimerSyncPair = 2;
+constexpr UINT kMessageSyncPing = WM_APP + 7;
+constexpr wchar_t kSyncAgentClass[] = L"WowTypeSyncAgent";
+constexpr wchar_t kSyncRunValue[] = L"WowTypeSync";
+constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr ULONGLONG kTranslateTestTimeoutMs = 45000;
 constexpr UINT kMessageProgress = WM_APP + 3;
 
@@ -148,6 +166,8 @@ const std::vector<Page> &pages() {
                      "FuzzyIn", "FuzzyIan", "FuzzyUan", "FuzzyUn", "FuzzyAnAi", "FuzzyHuangWang", "FuzzyUnIong",
                      "FuzzyEngOng"}},
         {L"标点与表情", {"AutoPairPunct", "EmojiKey", "Toolbar", "ClipboardHistory"}},
+        // 配对、访问口令、测试中转服务在这一页下面（refreshSync）
+        {L"跨设备", {"ClipboardSync", "ClipboardSyncLan", "ClipboardSyncRelayUrl", "ClipboardSyncDeviceName"}},
         {L"语音", {"Voice", "VoiceKey", "VoiceSilenceTimeout", "VoiceCopy"}},
         // TranslateLocal、TranslateBaseUrl、TranslateModel 不单独列：「翻译引擎」下拉框和它下面的框写它们
         // （translate::EngineChoice，和 Linux、macOS 一样）。本地模型的三项只在选了本地翻译时出现（isLocalTranslateKey）
@@ -217,6 +237,10 @@ const std::map<std::string, std::wstring> &labels() {
         {"EmojiKey", L"表情面板快捷键"},
         {"Toolbar", L"v + 空格打开工具栏"},
         {"ClipboardHistory", L"记剪贴板历史（只在内存里）"},
+        {"ClipboardSync", L"跨设备复制粘贴（一台电脑上复制，另一台上直接粘贴）"},
+        {"ClipboardSyncLan", L"同一个局域网里直接传"},
+        {"ClipboardSyncRelayUrl", L"中转服务地址（https://…，不用就留空）"},
+        {"ClipboardSyncDeviceName", L"这台设备的名字（留空用电脑名）"},
         {"Voice", L"语音输入"},
         {"VoiceKey", L"语音键（Alt_R、Control_R、F8……）"},
         {"VoiceSilenceTimeout", widen(kVoiceSilenceTitle)},
@@ -541,6 +565,16 @@ private:
     bool updateAfterCheck_ = false;
     std::optional<update::Release> release_;
     int pageNamed(const wchar_t *title) const;
+    // 跨设备复制粘贴
+    void refreshSync(const wchar_t *note = nullptr);
+    bool saveSyncToken();
+    bool startSyncPairing(bool host);
+    void hostSyncPairing();
+    void joinSyncPairing();
+    void pollSyncPairing();
+    void stopSyncPairing();
+    void unpairSync();
+    void pingSyncRelay();
     HWND child(const wchar_t *cls, const wchar_t *text, DWORD style, int id);
 
     HINSTANCE instance_ = nullptr;
@@ -591,6 +625,21 @@ private:
     HWND voiceModel_ = nullptr;
     HWND voiceDownload_ = nullptr;
     HWND localModel_ = nullptr;
+    // 跨设备复制粘贴：配对的状态、显示配对码、输入配对码、取消配对、中转服务的访问口令、测试
+    HWND syncStatus_ = nullptr;
+    HWND syncHost_ = nullptr;
+    HWND syncCodeLabel_ = nullptr;
+    HWND syncCode_ = nullptr;
+    HWND syncJoin_ = nullptr;
+    HWND syncUnpair_ = nullptr;
+    HWND syncTokenLabel_ = nullptr;
+    HWND syncToken_ = nullptr;
+    HWND syncPing_ = nullptr;
+    /// 正在走的配对（主持或者加入）；没有是空
+    WowtypeSyncPairing *syncPairing_ = nullptr;
+    bool syncHosting_ = false;
+    bool syncPinging_ = false;
+    std::string syncTokenLoaded_;
     HWND updateCheck_ = nullptr;
     HWND updateInstall_ = nullptr;
     bool downloading_ = false;
@@ -782,6 +831,15 @@ void SettingsWindow::build() {
     voiceDownload_ = child(L"BUTTON", L"下载语音模型（约 100 MB，从微信输入法的服务器）…", BS_PUSHBUTTON | WS_TABSTOP,
                            kIdVoiceDownload);
     localModel_ = child(L"BUTTON", L"下载本地翻译模型（1.35 GB）和 llama-server…", BS_PUSHBUTTON | WS_TABSTOP, kIdLocalModel);
+    syncStatus_ = child(L"STATIC", L"", SS_LEFT, 0);
+    syncHost_ = child(L"BUTTON", L"显示配对码（在另一台设备上输入）", BS_PUSHBUTTON | WS_TABSTOP, kIdSyncHost);
+    syncCodeLabel_ = child(L"STATIC", L"另一台设备上显示的配对码", SS_LEFT, 0);
+    syncCode_ = child(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, kIdSyncCode);
+    syncJoin_ = child(L"BUTTON", L"配对", BS_PUSHBUTTON | WS_TABSTOP, kIdSyncJoin);
+    syncUnpair_ = child(L"BUTTON", L"取消配对", BS_PUSHBUTTON | WS_TABSTOP, kIdSyncUnpair);
+    syncTokenLabel_ = child(L"STATIC", L"中转服务的访问口令", SS_LEFT, 0);
+    syncToken_ = child(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP, kIdSyncToken);
+    syncPing_ = child(L"BUTTON", L"测试中转服务", BS_PUSHBUTTON | WS_TABSTOP, kIdSyncPing);
     nnlm_ = child(L"BUTTON", L"导入整句增强模型（微信输入法的 nlrgpt2_nnlm.bin）…", BS_PUSHBUTTON | WS_TABSTOP, kIdNnlm);
     voiceModel_ = child(L"BUTTON", L"导入语音模型（含 .xnet 和 dict.decoder.utf8.txt 的文件夹）…",
                         BS_PUSHBUTTON | WS_TABSTOP, kIdVoiceModel);
@@ -900,6 +958,28 @@ void SettingsWindow::layout() {
         y[page] += rowHeight + scale(6);
         bottom = std::max(bottom, y[page]);
     }
+    // 「跨设备」页：开关这些下面是配对的状态和按钮，再下面是中转服务的访问口令
+    {
+        const auto page = static_cast<std::size_t>(pageNamed(L"跨设备"));
+        const int full = width - margin * 4;
+        const int labelWidth = scale(250);
+        int at = y[page] + scale(6);
+        MoveWindow(syncStatus_, margin * 2, at, full, scale(40), FALSE);
+        at += scale(44);
+        MoveWindow(syncHost_, margin * 2, at, scale(280), scale(28), FALSE);
+        MoveWindow(syncUnpair_, margin * 2 + scale(290), at, scale(110), scale(28), FALSE);
+        at += rowHeight + scale(6);
+        MoveWindow(syncCodeLabel_, margin * 2, at + scale(4), labelWidth, scale(22), FALSE);
+        MoveWindow(syncCode_, margin * 2 + scale(260), at, scale(110), scale(24), FALSE);
+        MoveWindow(syncJoin_, margin * 2 + scale(380), at - scale(1), scale(80), scale(26), FALSE);
+        at += rowHeight + scale(6);
+        MoveWindow(syncTokenLabel_, margin * 2, at + scale(4), labelWidth, scale(22), FALSE);
+        MoveWindow(syncToken_, margin * 2 + scale(260), at, full - scale(260) - scale(140), scale(24), FALSE);
+        MoveWindow(syncPing_, margin * 2 + full - scale(130), at - scale(1), scale(130), scale(26), FALSE);
+        at += rowHeight;
+        y[page] = at;
+        bottom = std::max(bottom, at);
+    }
     // 自定义词页：上面是列表，下面是加词的两个框和按钮
     // 1366×768 的屏幕上也要放得下（CI 的截图里 500 太高，下面的按钮被任务栏挡住）
     bottom = std::max(bottom, top + scale(420));
@@ -961,6 +1041,13 @@ void SettingsWindow::showPage(int page) {
     }
     refreshTranslate();
     ShowWindow(nnlm_, page == pageNamed(L"输入") ? SW_SHOW : SW_HIDE);
+    for (HWND h : {syncStatus_, syncHost_, syncCodeLabel_, syncCode_, syncJoin_, syncUnpair_, syncTokenLabel_,
+                   syncToken_, syncPing_}) {
+        ShowWindow(h, page == pageNamed(L"跨设备") ? SW_SHOW : SW_HIDE);
+    }
+    if (page == pageNamed(L"跨设备")) {
+        refreshSync();
+    }
     ShowWindow(diagnostics_, page == pageNamed(L"常规") ? SW_SHOW : SW_HIDE);
     ShowWindow(updateCheck_, page == pageNamed(L"常规") ? SW_SHOW : SW_HIDE);
     ShowWindow(updateInstall_, page == pageNamed(L"常规") ? SW_SHOW : SW_HIDE);
@@ -1020,6 +1107,11 @@ void SettingsWindow::load() {
         apiKeyLoaded_.pop_back();
     }
     SetWindowTextW(apiKey_, widen(apiKeyLoaded_).c_str());
+    syncTokenLoaded_ = readFile(dataDir() + L"\\sync-relay.key").value_or("");
+    while (!syncTokenLoaded_.empty() && (syncTokenLoaded_.back() == '\n' || syncTokenLoaded_.back() == '\r')) {
+        syncTokenLoaded_.pop_back();
+    }
+    SetWindowTextW(syncToken_, widen(syncTokenLoaded_).c_str());
     translate_.load(base_);
     syncTranslateControls();
     if (!lookApplied_.empty()) {
@@ -1228,8 +1320,14 @@ bool SettingsWindow::save() {
         }
         apiKeyLoaded_ = key;
     }
+    if (!saveSyncToken()) {
+        SetWindowTextW(status_, L"保存失败：写不了 sync-relay.key");
+        return false;
+    }
     // 读回来：写进去的就是窗口里的（数字夹到范围里、写错的快捷键保持原样）
     load();
+    // 跨设备复制粘贴开着：后台进程要在（登录时自己起）；关了：不再自己起，开着的那个看到设置变了会退
+    setSyncAgent(base_.flag("ClipboardSync"));
     SetWindowTextW(status_, L"已保存，下一次按键时生效");
     return true;
 }
@@ -1535,6 +1633,216 @@ void SettingsWindow::downloadLocalModel() {
             DeleteFileW(zip.c_str());
         }
         PostMessageW(window, kMessageLocalDone, 0, reinterpret_cast<LPARAM>(result));
+    }).detach();
+}
+
+// ---------------------------------------------------------------- 跨设备复制粘贴（docs/SYNC.md）
+//
+// 设置窗口只管配对和设置；收发在后台进程里（同一个程序带 --sync-agent，见 runSyncAgent）：输入法是加载进
+// 每个应用进程的 DLL，不能每个进程各起一份。配对走核心的 wowtype_sync_pair_*，和 Linux、macOS 是同一套代码。
+
+namespace {
+
+std::wstring syncStateFile() { return dataDir() + L"\\sync.json"; }
+std::wstring syncRelayKeyFile() { return dataDir() + L"\\sync-relay.key"; }
+
+/// ClipboardSyncDeviceName 留空时用电脑名
+std::string syncDeviceName(const Config &config) {
+    std::string name = config.value("ClipboardSyncDeviceName");
+    if (name.empty()) {
+        wchar_t buffer[MAX_COMPUTERNAME_LENGTH + 1] = {};
+        DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
+        if (GetComputerNameW(buffer, &size)) {
+            name = narrow(buffer);
+        }
+    }
+    return name;
+}
+
+/// 配对文件里记着的：配没配对、和谁配的（顿号隔开）。不读密钥。
+std::pair<bool, std::wstring> syncPaired() {
+    const std::string state = narrow(syncStateFile());
+    const char *text = wowtype_sync_paired(state.c_str());
+    Json json;
+    if (!text || !parseJson(text, json)) {
+        return {false, L""};
+    }
+    const Json *paired = json.field("paired");
+    std::wstring names;
+    if (const Json *devices = json.field("devices")) {
+        for (const Json &device : devices->items) {
+            names += (names.empty() ? L"" : L"、") + widen(device.str());
+        }
+    }
+    return {paired && paired->truthy(), names};
+}
+
+} // namespace
+
+void SettingsWindow::refreshSync(const wchar_t *note) {
+    const auto [paired, names] = syncPaired();
+    const bool busy = syncPairing_ != nullptr || syncPinging_;
+    std::wstring text;
+    if (note) {
+        text = note;
+    } else if (paired) {
+        text = names.empty() ? L"已经配对" : L"已经和 " + names + L" 配对";
+    } else {
+        text = L"还没有配对：在一台设备上显示配对码，在另一台上输入。";
+    }
+    SetWindowTextW(syncStatus_, text.c_str());
+    SetWindowTextW(syncHost_, syncHosting_ ? L"取消" : L"显示配对码（在另一台设备上输入）");
+    EnableWindow(syncHost_, syncHosting_ || !busy);
+    EnableWindow(syncCode_, !busy);
+    EnableWindow(syncJoin_, !busy);
+    EnableWindow(syncPing_, !busy);
+    EnableWindow(syncUnpair_, paired && !busy);
+}
+
+/// 访问口令框里的和文件里的不一样就写文件（空的删掉）。配对、测试之前也要先写：核心从文件里读。
+bool SettingsWindow::saveSyncToken() {
+    wchar_t buffer[1024] = {};
+    GetWindowTextW(syncToken_, buffer, 1024);
+    const std::string token = narrow(buffer);
+    if (token == syncTokenLoaded_) {
+        return true;
+    }
+    CreateDirectoryW(dataDir().c_str(), nullptr);
+    if (token.empty()) {
+        DeleteFileW(syncRelayKeyFile().c_str());
+    } else if (!writeFile(syncRelayKeyFile(), token + "\n")) {
+        return false;
+    }
+    syncTokenLoaded_ = token;
+    return true;
+}
+
+bool SettingsWindow::startSyncPairing(bool host) {
+    if (syncPairing_ || syncPinging_) {
+        return false;
+    }
+    if (!saveSyncToken()) {
+        SetWindowTextW(status_, L"写不了 sync-relay.key");
+        return false;
+    }
+    CreateDirectoryW(dataDir().c_str(), nullptr);
+    const Config config = fromControls();
+    const std::string state = narrow(syncStateFile());
+    const std::string name = syncDeviceName(config);
+    const std::string relay = config.value("ClipboardSyncRelayUrl");
+    const std::string key = narrow(syncRelayKeyFile());
+    WowtypeSyncPairConfig pair{};
+    pair.size = sizeof(pair);
+    pair.state_file = state.c_str();
+    pair.device_name = name.c_str();
+    pair.lan = config.flag("ClipboardSyncLan") ? 1 : 0;
+    pair.relay_url = relay.c_str();
+    pair.relay_key_file = key.c_str();
+    if (host) {
+        syncPairing_ = wowtype_sync_pair_host(&pair);
+    } else {
+        wchar_t buffer[64] = {};
+        GetWindowTextW(syncCode_, buffer, 64);
+        const std::string code = narrow(buffer);
+        syncPairing_ = wowtype_sync_pair_join(&pair, code.c_str());
+    }
+    if (!syncPairing_) {
+        SetWindowTextW(status_, L"这个版本没带跨设备复制粘贴");
+        return false;
+    }
+    syncHosting_ = host;
+    SetTimer(hwnd_, kTimerSyncPair, 200, nullptr);
+    refreshSync(host ? L"正在准备配对码……" : L"正在找另一台设备……");
+    return true;
+}
+
+void SettingsWindow::hostSyncPairing() {
+    if (syncHosting_) {
+        // 「取消」
+        stopSyncPairing();
+        refreshSync();
+        return;
+    }
+    startSyncPairing(true);
+}
+
+void SettingsWindow::joinSyncPairing() {
+    startSyncPairing(false);
+}
+
+void SettingsWindow::pollSyncPairing() {
+    if (!syncPairing_) {
+        KillTimer(hwnd_, kTimerSyncPair);
+        return;
+    }
+    const int state = wowtype_sync_pairing_state(syncPairing_);
+    const std::wstring text = widen(wowtype_sync_pairing_text(syncPairing_));
+    if (state == WOWTYPE_SYNC_PAIR_STARTING) {
+        return;
+    }
+    if (state == WOWTYPE_SYNC_PAIR_WAITING) {
+        const std::wstring code = text.size() == 6 ? text.substr(0, 3) + L" " + text.substr(3) : text;
+        refreshSync((L"配对码 " + code + L"：在另一台设备的 WowType 设置里输入，5 分钟内有效。").c_str());
+        return;
+    }
+    const bool done = state == WOWTYPE_SYNC_PAIR_DONE;
+    stopSyncPairing();
+    if (done) {
+        SetWindowTextW(syncCode_, L"");
+        SetWindowTextW(status_, (L"已经和 " + text + L" 配对").c_str());
+    } else {
+        SetWindowTextW(status_, text.c_str());
+    }
+    refreshSync();
+}
+
+/// 放掉正在走的配对（还在等的话就是取消）。
+void SettingsWindow::stopSyncPairing() {
+    KillTimer(hwnd_, kTimerSyncPair);
+    if (syncPairing_) {
+        wowtype_sync_pairing_free(syncPairing_);
+        syncPairing_ = nullptr;
+    }
+    syncHosting_ = false;
+}
+
+void SettingsWindow::unpairSync() {
+    if (MessageBoxW(hwnd_,
+                    L"这台设备不再收到别的设备复制的内容，也不再把这里复制的发出去。\n"
+                    L"别的设备之间不受影响；以后想恢复，重新配一次对就行。",
+                    L"取消配对？", MB_OKCANCEL | MB_ICONQUESTION) != IDOK) {
+        return;
+    }
+    const std::string state = narrow(syncStateFile());
+    SetWindowTextW(status_, wowtype_sync_unpair(state.c_str()) == 0 ? L"已取消配对" : L"配对文件改不了");
+    refreshSync();
+}
+
+void SettingsWindow::pingSyncRelay() {
+    if (syncPairing_ || syncPinging_) {
+        return;
+    }
+    if (!saveSyncToken()) {
+        SetWindowTextW(status_, L"写不了 sync-relay.key");
+        return;
+    }
+    const std::string relay = fromControls().value("ClipboardSyncRelayUrl");
+    if (relay.empty()) {
+        SetWindowTextW(status_, L"先填中转服务的地址");
+        return;
+    }
+    syncPinging_ = true;
+    SetWindowTextW(status_, L"正在连接中转服务……");
+    refreshSync();
+    const std::string key = narrow(syncRelayKeyFile());
+    HWND window = hwnd_;
+    // 要连网，放后台线程；结果用消息带回来
+    std::thread([relay, key, window] {
+        auto *result = new std::wstring(L"中转服务连得上，访问口令也对");
+        if (wowtype_sync_ping(relay.c_str(), key.c_str()) != 0) {
+            *result = widen(wowtype_last_error());
+        }
+        PostMessageW(window, kMessageSyncPing, 0, reinterpret_cast<LPARAM>(result));
     }).detach();
 }
 
@@ -2107,6 +2415,18 @@ LRESULT SettingsWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
         case kIdNnlm:
             importNnlm();
             return 0;
+        case kIdSyncHost:
+            hostSyncPairing();
+            return 0;
+        case kIdSyncJoin:
+            joinSyncPairing();
+            return 0;
+        case kIdSyncUnpair:
+            unpairSync();
+            return 0;
+        case kIdSyncPing:
+            pingSyncRelay();
+            return 0;
         case kIdVoiceModel:
             importVoiceModel();
             return 0;
@@ -2158,7 +2478,18 @@ LRESULT SettingsWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             pollTranslateTest();
             return 0;
         }
+        if (wParam == kTimerSyncPair) {
+            pollSyncPairing();
+            return 0;
+        }
         break;
+    case kMessageSyncPing: {
+        std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring *>(lParam));
+        syncPinging_ = false;
+        SetWindowTextW(status_, text->c_str());
+        refreshSync();
+        return 0;
+    }
     case kMessageProgress: {
         std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring *>(lParam));
         SetWindowTextW(status_, text->c_str());
@@ -2223,6 +2554,7 @@ LRESULT SettingsWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     case WM_DESTROY:
         stopTranslateTest();
+        stopSyncPairing();
         if (backgroundBrush_) {
             DeleteObject(backgroundBrush_);
         }
@@ -2242,6 +2574,277 @@ LRESULT SettingsWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
 /// 把 WowType 加进（或移出）当前用户的键盘列表（「设置 → 时间和语言 → 语言」里中文下面的键盘），没有中文就连中文一起加。
 /// 安装程序装完、卸载前以原来的用户身份调（--enable-input / --disable-input），和 macOS 装完加进输入法、Linux 加进 fcitx5 一样。
 /// 用系统 input.dll 的 InstallLayoutOrTip（Windows 文档里给输入法安装程序用的）。
+// ---- 跨设备复制粘贴的后台进程
+//
+// wowtype-settings.exe --sync-agent：一个不显示的窗口，听剪贴板变化，把复制的文字交给核心发出去；别的设备
+// 复制过来的放进系统剪贴板（Ctrl+V 就能贴，输入法的剪贴板历史也看得到）。开了「跨设备复制粘贴」并保存时由设置
+// 窗口起，以后登录时自己起（HKCU 的 Run）；设置里关掉以后它下一秒自己退。同一时间只有一个。
+
+namespace {
+
+struct SyncAgent {
+    WowtypeSync *sync = nullptr;
+    /// 剪贴板上现在的文字。nullopt：现在读不了，或者复制它的程序说了别拿走（密码管理器）
+    std::optional<std::string> text;
+    /// 上次看到的 wowtype.conf 原文（变了才重新配置）
+    std::optional<std::string> configText;
+    bool configured = false;
+};
+
+SyncAgent *syncAgent = nullptr;
+
+/// 复制的程序给剪贴板标了「别让监视剪贴板的程序拿走」（密码管理器会标）。
+bool clipboardExcluded() {
+    static const UINT exclude = RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
+    static const UINT history = RegisterClipboardFormatW(L"CanIncludeInClipboardHistory");
+    static const UINT cloud = RegisterClipboardFormatW(L"CanUploadToCloudClipboard");
+    if (exclude && IsClipboardFormatAvailable(exclude)) {
+        return true;
+    }
+    // 这两个是 DWORD：0 表示不许进剪贴板历史 / 不许传到别的设备
+    for (const UINT format : {history, cloud}) {
+        if (!format || !IsClipboardFormatAvailable(format)) {
+            continue;
+        }
+        if (HANDLE data = GetClipboardData(format)) {
+            if (GlobalSize(data) >= sizeof(DWORD)) {
+                if (const auto *value = static_cast<const DWORD *>(GlobalLock(data))) {
+                    const bool refused = *value == 0;
+                    GlobalUnlock(data);
+                    if (refused) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// 读剪贴板上的文字。读不了、标了别拿走是 nullopt；没有文字（复制的是图片、文件）是空串。
+std::optional<std::string> readClipboardText(HWND owner) {
+    bool opened = false;
+    // 别的程序正开着剪贴板时要等一下
+    for (int attempt = 0; attempt < 5 && !(opened = OpenClipboard(owner) != 0); ++attempt) {
+        Sleep(20);
+    }
+    if (!opened) {
+        return std::nullopt;
+    }
+    std::optional<std::string> text = std::string();
+    if (clipboardExcluded()) {
+        text = std::nullopt;
+    } else if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+        if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
+            if (const auto *chars = static_cast<const wchar_t *>(GlobalLock(data))) {
+                text = narrow(chars);
+                GlobalUnlock(data);
+            }
+        }
+    }
+    CloseClipboard();
+    // 太长的核心反正不发，不留一大段在内存里
+    if (text && text->size() > 16 * 1024) {
+        text = std::string();
+    }
+    return text;
+}
+
+bool writeClipboardText(HWND owner, const std::string &text) {
+    const std::wstring wide = widen(text);
+    const SIZE_T bytes = (wide.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) {
+        return false;
+    }
+    if (auto *target = static_cast<wchar_t *>(GlobalLock(memory))) {
+        std::memcpy(target, wide.c_str(), bytes);
+        GlobalUnlock(memory);
+    }
+    bool opened = false;
+    for (int attempt = 0; attempt < 5 && !(opened = OpenClipboard(owner) != 0); ++attempt) {
+        Sleep(20);
+    }
+    if (!opened) {
+        GlobalFree(memory);
+        return false;
+    }
+    EmptyClipboard();
+    // 放进去以后内存归系统管；没放成要自己还
+    const bool placed = SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
+    if (!placed) {
+        GlobalFree(memory);
+    }
+    CloseClipboard();
+    return placed;
+}
+
+/// 读设置、照着配核心。设置里关掉了返回 false（后台进程该退了）。
+bool configureSyncAgent(SyncAgent &agent) {
+    const auto text = readFile(dataDir() + L"\\wowtype.conf");
+    if (agent.configured && text == agent.configText) {
+        return true;
+    }
+    agent.configText = text;
+    agent.configured = true;
+    const Config config = text ? Config::parse(*text) : Config();
+    if (!config.flag("ClipboardSync")) {
+        return false;
+    }
+    if (!agent.sync) {
+        agent.sync = wowtype_sync_new();
+    }
+    if (!agent.sync) {
+        return false; // 核心没带同步
+    }
+    const std::string state = narrow(syncStateFile());
+    const std::string key = narrow(syncRelayKeyFile());
+    const std::string relay = config.value("ClipboardSyncRelayUrl");
+    const std::string name = syncDeviceName(config);
+    WowtypeSyncConfig raw{};
+    raw.size = sizeof(raw);
+    raw.enabled = 1;
+    raw.lan = config.flag("ClipboardSyncLan") ? 1 : 0;
+    raw.relay_url = relay.c_str();
+    raw.relay_key_file = key.c_str();
+    raw.state_file = state.c_str();
+    raw.device_name = name.c_str();
+    wowtype_sync_configure(agent.sync, &raw);
+    return true;
+}
+
+void tickSyncAgent(HWND hwnd, SyncAgent &agent) {
+    if (!configureSyncAgent(agent)) {
+        DestroyWindow(hwnd);
+        return;
+    }
+    // 没变也照报同一段（空的也报）：核心重新起来以后（刚配好对、换了设置）靠它认出「没变」，
+    // 第一次报的只当基准
+    if (agent.text) {
+        wowtype_sync_observe(agent.sync, agent.text->c_str());
+    }
+    // 最近十分钟有人动过键盘鼠标：中转服务那边保持连接，别的设备复制的马上能到
+    LASTINPUTINFO input{};
+    input.cbSize = sizeof(input);
+    if (GetLastInputInfo(&input) && GetTickCount() - input.dwTime < 10 * 60 * 1000) {
+        wowtype_sync_touch(agent.sync);
+    }
+    std::optional<std::string> latest;
+    while (const char *received = wowtype_sync_poll(agent.sync)) {
+        latest = received;
+    }
+    // 放进系统剪贴板：Ctrl+V 能贴。放进去会触发一次「剪贴板变了」，读回来的还是这一段，核心认得出来、不往回发
+    if (latest && writeClipboardText(hwnd, *latest)) {
+        agent.text = *latest;
+    }
+}
+
+LRESULT CALLBACK syncAgentProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_CLIPBOARDUPDATE:
+        if (syncAgent) {
+            syncAgent->text = readClipboardText(hwnd);
+        }
+        return 0;
+    case WM_TIMER:
+        if (syncAgent) {
+            tickSyncAgent(hwnd, *syncAgent);
+        }
+        return 0;
+    case WM_QUERYENDSESSION:
+        return TRUE;
+    case WM_ENDSESSION:
+    case WM_CLOSE:
+        // 注销、安装程序换新版本、卸载
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        RemoveClipboardFormatListener(hwnd);
+        KillTimer(hwnd, 1);
+        PostQuitMessage(0);
+        return 0;
+    default:
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+}
+
+} // namespace
+
+int runSyncAgent(HINSTANCE instance) {
+    // 同一时间只有一个
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\WowTypeSyncAgent");
+    if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+        return 0;
+    }
+    SyncAgent agent;
+    if (!configureSyncAgent(agent)) {
+        return 0; // 设置里没开
+    }
+    WNDCLASSEXW cls{};
+    cls.cbSize = sizeof(cls);
+    cls.lpfnWndProc = syncAgentProc;
+    cls.hInstance = instance;
+    cls.lpszClassName = kSyncAgentClass;
+    RegisterClassExW(&cls);
+    // 一个从不显示的普通窗口（不是只收消息的窗口）：安装程序换新版本时要找得到它、叫它退
+    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSyncAgentClass, L"WowType 跨设备复制粘贴", WS_POPUP, 0, 0, 0, 0,
+                                nullptr, nullptr, instance, nullptr);
+    if (!hwnd) {
+        return 1;
+    }
+    syncAgent = &agent;
+    // 安装程序换完新版本以后把它再起起来
+    RegisterApplicationRestart(L"--sync-agent", 0);
+    agent.text = readClipboardText(hwnd);
+    AddClipboardFormatListener(hwnd);
+    SetTimer(hwnd, 1, 1000, nullptr);
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    syncAgent = nullptr;
+    if (agent.sync) {
+        wowtype_sync_free(agent.sync);
+    }
+    ReleaseMutex(mutex);
+    CloseHandle(mutex);
+    return 0;
+}
+
+/// 叫正在跑的后台进程退（卸载、换版本）。
+void closeSyncAgent() {
+    if (HWND agent = FindWindowW(kSyncAgentClass, nullptr)) {
+        PostMessageW(agent, WM_CLOSE, 0, 0);
+    }
+}
+
+/// 开着：登录时自己起（HKCU 的 Run），现在没在跑就起一个。关了：不再自己起（开着的那个看到设置变了会退）。
+void setSyncAgent(bool enabled) {
+    if (!enabled) {
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, kRunKey, kSyncRunValue);
+        return;
+    }
+    wchar_t path[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) {
+        return;
+    }
+    std::wstring command = L"\"" + std::wstring(path) + L"\" --sync-agent";
+    RegSetKeyValueW(HKEY_CURRENT_USER, kRunKey, kSyncRunValue, REG_SZ, command.c_str(),
+                    static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+    if (FindWindowW(kSyncAgentClass, nullptr)) {
+        return; // 已经在跑
+    }
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    // CreateProcessW 会改命令行那块内存，要给它一份能写的
+    if (CreateProcessW(path, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process)) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+}
+
 int changeInputList(bool enable) {
     using InstallLayoutOrTipFn = BOOL(WINAPI *)(LPCWSTR, DWORD);
     HMODULE input = LoadLibraryW(L"input.dll");
@@ -2263,7 +2866,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return changeInputList(true);
     }
     if (wcsstr(GetCommandLineW(), L"--disable-input")) {
+        // 卸载：后台同步进程也停掉、不再登录时自己起
+        setSyncAgent(false);
+        closeSyncAgent();
         return changeInputList(false);
+    }
+    if (wcsstr(GetCommandLineW(), L"--sync-agent")) {
+        return runSyncAgent(instance);
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     // 已经开着：切过去

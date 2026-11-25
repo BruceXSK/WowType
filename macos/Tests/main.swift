@@ -962,6 +962,8 @@ do {
     all.translateLocalModel = "/Users/me/模型/HY-MT.gguf"
     all.translateLlamaServer = "/opt/homebrew/bin/llama-server"
     all.translateIdleMinutes = 30
+    all.clipboardSyncRelayUrl = "https://relay.example.workers.dev"
+    all.clipboardSyncDeviceName = "书房的 Mac"
     all.initialMode = .last
     all.windowMode = .english
     all.settingsTheme = .dark
@@ -2149,6 +2151,94 @@ if !haveCurl() {
     unlink(keyPath)
 } else {
     check(false, "起假翻译服务")
+}
+
+// MARK: 跨设备复制粘贴（核心的 wowtype_sync_* 上面那层 Swift 封装）
+
+do {
+    let dir = "/tmp/wowtype-sync-test-\(getpid())"
+    mkdir(dir, 0o700)
+    let (stateA, stateB) = (dir + "/a.json", dir + "/b.json")
+    defer {
+        for name in ["a.json", "b.json", "relay.key"] { unlink(dir + "/" + name) }
+        rmdir(dir)
+    }
+    /// 等到 probe 为真，最多 seconds 秒
+    func waitFor(_ seconds: Int, _ probe: () -> Bool) -> Bool {
+        for _ in 0..<(seconds * 50) where !probe() { usleep(20_000) }
+        return probe()
+    }
+
+    var config = WowtypeConfig()
+    check(!config.clipboardSync && config.clipboardSyncLan && config.clipboardSyncPaste
+          && config.clipboardSyncRelayUrl.isEmpty && config.clipboardSyncDeviceName.isEmpty,
+          "跨设备复制粘贴默认关，局域网直连和放进系统剪贴板默认开")
+    check(SyncFiles.normalize(code: " 123 456 ") == "123456" && SyncFiles.normalize(code: "123-456") == "123456"
+          && SyncFiles.normalize(code: "12345") == nil && SyncFiles.normalize(code: "１２３４５６") == nil
+          && SyncFiles.normalize(code: "12345a") == nil, "配对码只认 6 位数字，空格、短横去掉")
+    check(SyncFiles.spaced("123456") == "123 456" && SyncFiles.spaced("12") == "12", "配对码显示成 123 456")
+    let none = SyncFiles.devices(stateFile: stateA)
+    check(!none.paired && none.names.isEmpty, "没有配对文件是还没配对")
+
+    // 输入法里的那一份：没打开不建，打开了没配对也不发
+    let sync = ClipboardSync()
+    sync.configure(config, stateFile: stateA, relayKeyFile: dir + "/relay.key", hostName: "测试机")
+    check(sync.status == nil && !sync.observe("a") && sync.poll() == nil, "没打开过：不建、不起线程")
+    config.clipboardSync = true
+    sync.configure(config, stateFile: stateA, relayKeyFile: dir + "/relay.key", hostName: "测试机")
+    check(waitFor(10) { sync.status?["enabled"] as? Bool == true }, "打开以后核心跟上", "\(String(describing: sync.status))")
+    check(sync.status?["paired"] as? Bool == false && sync.status?["relay"] as? String == "off",
+          "还没配对、没填中转服务", "\(String(describing: sync.status))")
+    check(!sync.observe("原有的") && !sync.observe("新复制的"), "没配对不发")
+    sync.touch()
+
+    // 配对：甲显示配对码，乙输入。取消的不留痕迹
+    let host = SyncPairSettings(stateFile: stateA, deviceName: "甲", lan: true, relayUrl: "", relayKeyFile: "")
+    let guest = SyncPairSettings(stateFile: stateB, deviceName: "乙", lan: true, relayUrl: "", relayKeyFile: "")
+    func codeOf(_ pairing: SyncPairing) -> String? {
+        _ = waitFor(10) { pairing.state != .starting }
+        if case .waiting(let code) = pairing.state { return code }
+        return nil
+    }
+    var hosting: SyncPairing? = SyncPairing(host: host)
+    let first = hosting.flatMap(codeOf)
+    check(first.map { $0.count == 6 && SyncFiles.normalize(code: $0) == $0 } == true, "主持：出 6 位配对码",
+          "\(String(describing: hosting?.state))")
+    hosting = nil
+    usleep(400_000)
+    check(!SyncFiles.devices(stateFile: stateA).paired, "取消配对码不留下组密钥")
+
+    hosting = SyncPairing(host: host)
+    if let pairing = hosting, let code = codeOf(pairing) {
+        let joining = SyncPairing(join: guest, code: code)
+        _ = waitFor(40) { joining.state != .starting }
+        if case .failed(let reason) = joining.state, reason.contains("没找到") {
+            // 没有能广播的网卡（有的 CI 容器）：真配对这一步跳过，核心自己的测试里有
+            print("skip 跨设备复制粘贴：这台机器上广播收不到自己（\(reason)）")
+        } else {
+            check(joining.state == .done(device: "甲"), "加入：配上了，对方叫甲", "\(joining.state)")
+            check(waitFor(10) { pairing.state == .done(device: "乙") }, "主持：配上了，对方叫乙", "\(pairing.state)")
+            let (a, b) = (SyncFiles.devices(stateFile: stateA), SyncFiles.devices(stateFile: stateB))
+            check(a.paired && a.names == ["乙"] && b.paired && b.names == ["甲"], "两边的配对文件都记下了对方", "\(a) \(b)")
+            // 输入法那一份盯着配对文件：配好了自己起来
+            check(waitFor(15) { sync.status?["paired"] as? Bool == true }, "配好对以后输入法那边自己跟上",
+                  "\(String(describing: sync.status))")
+            check(SyncFiles.unpair(stateFile: stateB) && !SyncFiles.devices(stateFile: stateB).paired
+                  && SyncFiles.devices(stateFile: stateA).paired, "取消配对只动自己")
+        }
+    } else {
+        check(false, "主持：第二次也出配对码", "\(String(describing: hosting?.state))")
+    }
+    hosting = nil
+
+    let bad = SyncPairing(join: guest, code: "12")
+    check(waitFor(10) { bad.state == .failed(reason: "配对码是 6 位数字") }, "配对码不对：说得出原因", "\(bad.state)")
+    check(SyncFiles.ping(relayUrl: "", relayKeyFile: "") == "还没有填中转服务的地址"
+          && SyncFiles.ping(relayUrl: "https://relay.example.com", relayKeyFile: dir + "/没有") == "还没有填中转服务的访问口令",
+          "测试中转服务：没填地址、没有口令都不联网就说得出原因")
+    writeFile(dir + "/relay.key", "token\n")
+    check(SyncFiles.ping(relayUrl: "http://relay.example.com", relayKeyFile: dir + "/relay.key")?.contains("https://") == true,
+          "中转服务的地址要 https")
 }
 
 // MARK: 本地翻译模型（和 Linux 设置的 download_model / install_llama_server 一样）

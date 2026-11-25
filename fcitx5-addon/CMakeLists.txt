@@ -140,9 +140,10 @@ if(WOWTYPE_DATA_DIR)
             DESTINATION "${CMAKE_INSTALL_DATADIR}/wowtype" OPTIONAL)
     endforeach()
 endif()
-# 自检工具 wowtype-check、wowtype-show：和核心库一起由 cargo 编在同一个目录
+# 自检工具 wowtype-check、wowtype-show 和跨设备复制粘贴的配对工具 wowtype-sync：
+# 和核心库一起由 cargo 编在同一个目录
 get_filename_component(_wowtype_cargo_dir "${WOWTYPE_CORE_LIB}" DIRECTORY)
-foreach(_wowtype_tool wowtype-check wowtype-show)
+foreach(_wowtype_tool wowtype-check wowtype-show wowtype-sync)
     install(PROGRAMS "${_wowtype_cargo_dir}/${_wowtype_tool}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}" OPTIONAL)
 endforeach()

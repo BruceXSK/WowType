@@ -33,6 +33,10 @@ pub mod stats;
 pub mod stats_ffi;
 pub mod syllable;
 pub mod symbols;
+#[cfg(feature = "sync")]
+pub mod sync_ffi;
+#[cfg(not(feature = "sync"))]
+pub mod sync_stub;
 pub mod train;
 pub mod translate;
 pub mod translate_ffi;

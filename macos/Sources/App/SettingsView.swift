@@ -602,6 +602,7 @@ private struct InputPage: View {
                 SwitchRow(title: "汉字和数字之间", isOn: $model.config.autoSpaceDigits)
             }
         }
+        SyncGroup(model: model)
     }
 
     /// 快捷键下拉框选的键名（同 wowtype.conf）；空串是不用
@@ -646,6 +647,106 @@ private struct InputPage: View {
 
     private var lexiconColor: Color? {
         model.lexiconKind == .custom && model.customLexiconMissing ? palette.warning : nil
+    }
+}
+
+/// 跨设备复制粘贴（docs/SYNC.md）：开关、配对（显示配对码 / 输入配对码 / 取消配对），中转服务这些收进
+/// 「更多选项」。和 Linux 设置的一样；配对的状态在 SyncSettings。
+private struct SyncGroup: View {
+    @ObservedObject var model: SettingsModel
+    @StateObject private var sync = SyncSettings()
+    @State private var code = ""
+    @State private var token = ""
+
+    private static let guide = URL(string: "https://github.com/Gloridust/WowType/tree/main/relay/cloudflare")!
+
+    var body: some View {
+        PrefGroup("跨设备复制粘贴",
+                  info: "一台电脑上复制的文字，在另一台装了 WowType 的电脑上直接粘贴：按 Command+V，"
+                      + "或者打 v 再按空格，在「剪贴板」里选。只传文字（最多 16 KB），不传图片和文件。\n\n"
+                      + "没有账号，也不经过 WowType 的服务器。两台设备用 6 位配对码配一次对，之后的内容都在设备上加密，"
+                      + "只有配过对的设备解得开。\n\n"
+                      + "同一个局域网里设备之间直接传（防火墙要放行 39217 端口的 UDP 和 TCP）。"
+                      + "不在同一个局域网时，可以自己部署一个中转服务（Cloudflare Worker，免费套餐够用），它只看得到密文。\n\n"
+                      + "密码管理器标了「不要记」的不传，没标的密码会被传过去。",
+                  links: [("怎么部署中转服务", Self.guide)]) {
+            SwitchRow(title: "跨设备复制粘贴", isOn: $model.config.clipboardSync)
+            RowDivider()
+            HStack(spacing: 8) {
+                RowLabel(title: "配对", subtitle: sync.summary)
+                Button(sync.hosting ? "取消" : "显示配对码") {
+                    sync.toggleCode(config: model.config) { model.showToast($0) }
+                }
+                .disabled(sync.busy)
+                if sync.paired && !sync.hosting {
+                    Button("取消配对") { sync.unpair { model.showToast($0) } }
+                        .disabled(sync.busy)
+                }
+            }
+            .rowPadding()
+            RowDivider()
+            HStack(spacing: 8) {
+                RowLabel(title: "输入另一台设备上显示的配对码")
+                TextField("6 位数字", text: $code)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 110)
+                    .onSubmit(join)
+                Button("配对", action: join)
+                    .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .rowPadding()
+            .disabled(sync.hosting || sync.busy)
+            RowDivider()
+            ExpanderRow(title: "更多选项") {
+                SwitchRow(title: "同一个局域网里直接传", isOn: $model.config.clipboardSyncLan)
+                RowDivider()
+                TextRow(title: "中转服务地址", subtitle: "不用就留空", placeholder: "https://…",
+                        text: trimmed(\.clipboardSyncRelayUrl))
+                RowDivider()
+                HStack(spacing: 8) {
+                    RowLabel(title: "中转服务的访问口令", subtitle: sync.tokenSet ? "已设置（不显示）" : nil)
+                    SecureField(sync.tokenSet ? "换一个" : "部署时设的口令", text: $token)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                        .onSubmit(saveToken)
+                    Button("保存", action: saveToken)
+                        .disabled(token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if sync.tokenSet {
+                        Button("删除") { sync.setToken("") { model.showToast($0) } }
+                    }
+                }
+                .rowPadding()
+                RowDivider()
+                HStack(spacing: 8) {
+                    RowLabel(title: "测试中转服务", subtitle: sync.pingResult)
+                    Button("测试") { sync.ping(config: model.config) }
+                        .disabled(sync.busy)
+                }
+                .rowPadding()
+                RowDivider()
+                TextRow(title: "这台设备的名字", placeholder: sync.defaultName,
+                        text: trimmed(\.clipboardSyncDeviceName))
+                RowDivider()
+                SwitchRow(title: "收到的放进系统剪贴板", subtitle: "关掉以后只出现在 v + 空格的「剪贴板」里",
+                          isOn: $model.config.clipboardSyncPaste)
+            }
+        }
+    }
+
+    private func join() {
+        sync.join(code: code, config: model.config, toast: { model.showToast($0) }, done: { code = "" })
+    }
+
+    private func saveToken() {
+        let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        sync.setToken(value) { model.showToast($0) }
+        token = ""
+    }
+
+    private func trimmed(_ path: WritableKeyPath<WowtypeConfig, String>) -> Binding<String> {
+        Binding(get: { model.config[keyPath: path] },
+                set: { model.config[keyPath: path] = $0.trimmingCharacters(in: .whitespacesAndNewlines) })
     }
 }
 

@@ -43,6 +43,7 @@
             cat show.txt
             grep -q '1\.你好' show.txt
             wowtype-config --self-test
+            wowtype-sync status --state $TMPDIR/sync.json | grep -q '"paired":false'
             touch $out
           '';
         }

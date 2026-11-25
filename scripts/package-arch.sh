@@ -30,7 +30,7 @@ trap 'rm -rf "$work"' EXIT
 # 不依赖按键测试留下的二进制，也不往 checkout 写 root 所有的构建文件。
 mkdir -p "$work/source/dist/data"
 tar --exclude=target --exclude='build*' -cf - \
-  Cargo.toml Cargo.lock core voice voice-daemon fcitx5-addon icons themes settings README.md |
+  Cargo.toml Cargo.lock core voice voice-daemon sync fcitx5-addon icons themes settings README.md |
   tar -xf - -C "$work/source"
 cp "$DATA"/{lexicon.tsv,english.txt,words.lm,LICENSE,SOURCE.txt} "$work/source/dist/data/"
 cp "$DATA"/{wubi86.tsv,WUBI-LICENSE,WUBI-SOURCE.txt,WUBI-AUTHORS} "$work/source/dist/data/"
@@ -76,7 +76,7 @@ prepare() {
 build() {
   cd "$srcdir" || return
   cargo build --release --frozen -p wowtype-core --lib \
-    --bin wowtype-check --bin wowtype-show
+    --bin wowtype-check --bin wowtype-show --bin wowtype-sync
   cmake -S fcitx5-addon -B build -DCMAKE_BUILD_TYPE=None \
     -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib -DWOWTYPE_VERSION="$pkgver"
   cmake --build build -j"$(nproc)"
@@ -92,7 +92,7 @@ package() {
   DESTDIR="$pkgdir" cmake --install build
   rm -r "$pkgdir/usr/include/wowtype"
   rmdir --ignore-fail-on-non-empty "$pkgdir/usr/include"
-  for bin in wowtype-check wowtype-show; do
+  for bin in wowtype-check wowtype-show wowtype-sync; do
     install -Dm755 "target/release/$bin" "$pkgdir/usr/bin/$bin"
   done
   install -m644 dist/data/{lexicon.tsv,english.txt,words.lm,wubi86.tsv} "$pkgdir/usr/share/wowtype/"

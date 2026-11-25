@@ -262,6 +262,7 @@ class WowTypeInputController: IMKInputController {
         AppState.shared.activeController = self
         // 剪贴板历史（设置里打开时）：切换输入框时看一眼（和 Linux 一样，另外打开工具栏的剪贴板页时也看）
         AppState.shared.sampleClipboard()
+        AppState.shared.touchClipboardSync()
         // 每天最多查一次有没有新版本（后台，有新版时菜单里多一项）
         AppState.shared.checkUpdateIfDue()
     }

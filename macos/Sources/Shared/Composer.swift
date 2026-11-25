@@ -364,7 +364,7 @@ public final class Composer {
         if noWayBack || (mode == .translate && !translateAvailable) {
             switchMode(to: .chinese)
         }
-        if !config.clipboardHistory {
+        if !config.clipboardHistory && !config.clipboardSync {
             ClipboardHistory.clear()
         }
         configure()
@@ -711,7 +711,8 @@ public final class Composer {
         // 互译只翻一句（#191）：双击 Shift 进「译」，翻完回去的 frame 可能在 pollTranslation 里，外壳比对模式跟上
         config.translate_one_shot = settings.translateOneShot ? 1 : 0
         config.toolbar = settings.toolbar ? 1 : 0
-        config.clipboard_history = settings.clipboardHistory ? 1 : 0
+        // 跨设备复制粘贴开着时，别的设备复制过来的也在工具栏的「剪贴板」里
+        config.clipboard_history = (settings.clipboardHistory || settings.clipboardSync) ? 1 : 0
         config.shuangpin_keys = settings.shuangpinShowKeys ? 1 : 0
         config.wubi = settings.wubi ? 1 : 0
         config.wubi_auto_commit = settings.wubiAutoCommit ? 1 : 0

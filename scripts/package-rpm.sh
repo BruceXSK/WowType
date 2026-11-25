@@ -35,7 +35,7 @@ mkdir -p "$work"/{SOURCES,SPECS,BUILD,BUILDROOT,SRPMS}
 src="$work/source"
 mkdir -p "$src/dist/data" "$src/packaging"
 tar --exclude=target --exclude='build*' -cf - \
-  Cargo.toml Cargo.lock core voice voice-daemon fcitx5-addon icons themes settings README.md |
+  Cargo.toml Cargo.lock core voice voice-daemon sync fcitx5-addon icons themes settings README.md |
   tar -xf - -C "$src"
 cp "$DATA"/{lexicon.tsv,english.txt,words.lm,LICENSE,SOURCE.txt} "$src/dist/data/"
 cp "$DATA"/{wubi86.tsv,WUBI-LICENSE,WUBI-SOURCE.txt,WUBI-AUTHORS} "$src/dist/data/"
@@ -54,7 +54,7 @@ fi
 cat > "$src/packaging/COPYRIGHT" <<'EOF'
 WowType — https://github.com/Gloridust/WowType
 
-程序（fcitx5 插件、设置界面、wowtype-check、wowtype-show、主题、图标）：
+程序（fcitx5 插件、设置界面、wowtype-check、wowtype-show、wowtype-sync、主题、图标）：
   MIT 或 Apache-2.0，二选一。
 
 /usr/share/wowtype/s2t.tsv：
@@ -150,7 +150,7 @@ cmake --build build -j%{?_smp_build_ncpus}%{!?_smp_build_ncpus:2}
 %install
 DESTDIR=%{buildroot} cmake --install build
 rm -rf %{buildroot}%{_includedir}
-for bin in wowtype-check wowtype-show; do
+for bin in wowtype-check wowtype-show wowtype-sync; do
   install -Dm755 target/release/$bin %{buildroot}%{_bindir}/$bin
 done
 install -m644 dist/data/lexicon.tsv dist/data/english.txt dist/data/words.lm dist/data/wubi86.tsv \
@@ -185,6 +185,7 @@ install -Dm644 dist/data/WUBI-LICENSE $lic/LICENSE.rime-wubi
 %{_bindir}/wowtype-config
 %{_bindir}/wowtype-check
 %{_bindir}/wowtype-show
+%{_bindir}/wowtype-sync
 %{_libdir}/fcitx5/libwowtype.so
 %{_datadir}/fcitx5/addon/wowtype.conf
 %{_datadir}/fcitx5/inputmethod/wowtype.conf

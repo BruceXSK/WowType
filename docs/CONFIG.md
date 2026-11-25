@@ -182,6 +182,11 @@ DateTime=True
 Calculator=True
 Toolbar=True
 ClipboardHistory=False
+ClipboardSync=False
+ClipboardSyncLan=True
+ClipboardSyncRelayUrl=
+ClipboardSyncDeviceName=
+ClipboardSyncPaste=True
 AutoSpace=False
 AutoSpaceLetters=True
 AutoSpaceDigits=True
@@ -219,6 +224,7 @@ Lexicon=
 | `PageSize` | 每页候选个数，3–9 |
 | `VoiceSilenceTimeout` | 点按说话（点一下语音键开始说）时没声音多久自动结束，毫秒，0–60000，默认 `1500`（1.5 秒）。设置「语音」页里叫「停顿多久自动结束」，能选 1.5、3、5、10、30 秒和「不自动结束」（`0`：只有再点一下语音键才结束，`Esc` 取消）。一次最长录 2 分钟，到了照常出结果。长按说话松开就结束，不受这一项影响（#285） |
 | `Fuzzy`、`TypoCorrection`、`Traditional`、`DateTime`、`Calculator`、`Toolbar`、`ClipboardHistory`、`Voice`、`VoiceCopy`、`EmojiSuggest`、`Translate`、`TranslateFormal`、`TranslateOneShot`、`CheckUpdate`、`BetaUpdates`、`TypingStats` | `True` / `False` |
+| `ClipboardSync`、`ClipboardSyncLan`、`ClipboardSyncRelayUrl`、`ClipboardSyncDeviceName`、`ClipboardSyncPaste` | [跨设备复制粘贴](SYNC.md)：总开关（默认关）、局域网直连（默认开）、自建中转服务的地址（空着不用）、这台设备的名字（空着用主机名）、收到的也放进系统剪贴板（默认开）。配对在设置界面里做，组密钥存在 `~/.config/wowtype/sync.json`，中转服务的访问口令存在 `~/.config/wowtype/sync-relay.key`（macOS、Windows 在各自的数据目录里），都不写进 `wowtype.conf`。Windows 没有最后一项，收到的总是放进系统剪贴板 |
 | `AutoSpace`、`AutoSpaceLetters`、`AutoSpaceDigits` | 中英文之间自动加空格：总开关（默认关）、汉字和字母之间、汉字和数字之间。要应用报告光标前的文字才生效（终端等不支持），密码、网址、邮箱输入框不加 |
 | `AutoPairPunct` | 中文标点自动配对，默认关，在设置的「输入」页（「拼音」那一组）打开。中文标点下打 `(` `[` `<` `{` `"` `'` 上屏成对的（）【】《》「」“”‘’，光标放到中间；在里面打完再按右半边（`)` `]` `>` `}` `"` `'`）不再多上屏一个，而是跳过补好的那个（打拼音途中按的先上屏候选），数字后面也一样：`(` `3` `)` 是（3）。可以套着打（“”）。里面空着时按退格两个一起删。里面打字、空格、退格都不打断配对；按了方向键、`Home` `End`、回车、`Tab`、`Delete`、快捷键，换了窗口、点鼠标挪了光标（应用重置输入法）以后不再跳过。数字后面的左括号照常是半角（`3(`），不配对；互译、半角标点时不配对。Linux 上光标靠插件给应用发方向键挪；macOS 上没有挪光标的接口（发方向键要「辅助功能」权限），靠输入法按位置换字：把光标要停的位置前面那个字原样换一遍，光标就落在那里（和长按出重音字母一样的接口），所以只在应用告诉输入法光标在哪、读得到光标旁边的字时配对，终端这类应用里、空的输入框里第一个字照常一个一个上屏。应用报告光标前后文字时，跳过、一起删之前还核对右边确实是补好的那个 |
 | `FuzzyZh`、`FuzzyCh`、`FuzzySh`、`FuzzyNL`、`FuzzyFH`、`FuzzyRL`、`FuzzyAn`、`FuzzyEn`、`FuzzyIn`、`FuzzyIan`、`FuzzyUan`、`FuzzyUn`、`FuzzyAnAi`、`FuzzyHuangWang`、`FuzzyUnIong`、`FuzzyEngOng` | 模糊音的各组（z=zh、c=ch、s=sh、n=l、f=h、r=l、an=ang、en=eng、in=ing、ian=iang、uan=uang、un=ong、an=ai、huang=wang、un=iong、eng=ong），`Fuzzy` 打开时才生效 |
@@ -292,6 +298,9 @@ Lexicon=
 | `WOWTYPE_LOG` | 日志文件路径，默认 `~/.local/state/wowtype/wowtype.log`；`0` 不写 |
 | `WOWTYPE_TRANSLATE=1`、`WOWTYPE_TRANSLATE_URL`、`WOWTYPE_TRANSLATE_MODEL`、`WOWTYPE_TRANSLATE_TARGET` | 互译开关、服务地址、模型、语言 |
 | `WOWTYPE_TRANSLATE_KEY_FILE` | 互译 Key 文件，默认 `~/.config/wowtype/translate.key` |
+| `WOWTYPE_CLIPBOARD_SYNC=1` | 打开[跨设备复制粘贴](SYNC.md) |
+| `WOWTYPE_SYNC_STATE_FILE`、`WOWTYPE_SYNC_RELAY_KEY_FILE` | 配对文件和中转服务访问口令文件的位置，默认 `~/.config/wowtype/sync.json`、`~/.config/wowtype/sync-relay.key` |
+| `WOWTYPE_SYNC_LAN_PORT`、`WOWTYPE_SYNC_PEERS`、`WOWTYPE_SYNC_BEACON_MS`、`WOWTYPE_SYNC_PAIR_HOST` | 测试、排查用：换局域网端口（默认 39217）；除了广播还往这些 `地址:端口` 发（逗号分开）；广播间隔（毫秒）；设置界面输入配对码时不靠广播找、直接连这个 `地址:端口` |
 
 临时试一下：`WOWTYPE_FUZZY=1 fcitx5 -r -d`。长期用写进 `~/.config/environment.d/wowtype.conf`，注销重新登录后生效。
 
