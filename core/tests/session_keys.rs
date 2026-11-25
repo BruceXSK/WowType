@@ -4544,6 +4544,19 @@ fn trace_times_a_composition_and_names_modified_keys() {
 }
 
 #[test]
+fn trace_skips_the_emoji_panel_search() {
+    // 表情面板里打的是搜索词：不当成一次输入记，关掉面板也不算放弃
+    let mut session = traced(engine());
+    session.toggle_emoji_panel();
+    type_keys(&mut session, "xiao<esc>");
+    assert!(!session.composing());
+    assert!(session.take_trace().is_empty());
+    // 关了面板以后照常记
+    type_keys(&mut session, "nihao<sp>");
+    assert_eq!(session.take_trace().len(), 1);
+}
+
+#[test]
 fn trace_stays_out_of_password_fields() {
     use wowtype_core::session::key_hints::NO_LEARN;
     let mut session = traced(engine());

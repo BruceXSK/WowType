@@ -1054,7 +1054,8 @@ impl<'e> Session<'e> {
 
     /// 把这次调用的键记进这次输入的按键串。
     fn trace_key(&mut self) {
-        if !self.tracing() {
+        // 工具栏、表情面板里打的是搜索词，不是要上屏的输入：不记
+        if !self.tracing() || self.tool.is_some() {
             return;
         }
         if self.trace.keys.is_empty() {
