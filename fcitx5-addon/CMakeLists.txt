@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(wowtype-fcitx5 VERSION 0.7.4 LANGUAGES CXX)
+project(wowtype-fcitx5 VERSION 0.7.13 LANGUAGES CXX)
 
 # fcitx5 5.1 的头文件用到了 std::span、std::source_location
 set(CMAKE_CXX_STANDARD 20)
@@ -43,6 +43,13 @@ add_library(wowtype MODULE
 # fcitx5 5.1.11 起才有 showCustomInputMethodInformation（切中英文时的小提示）
 if(Fcitx5Core_VERSION VERSION_GREATER_EQUAL 5.1.11)
     target_compile_definitions(wowtype PRIVATE WOWTYPE_HAVE_CUSTOM_IM_INFO=1)
+endif()
+# fcitx5 5.1.10 起才有 ActionableCandidateList（候选上点右键的菜单：「忘掉这个词」，#229）；
+# Ubuntu 22.04 的 5.0 上没有右键菜单，Ctrl+Delete 照样能忘
+set(WOWTYPE_HAVE_CANDIDATE_ACTIONS OFF)
+if(Fcitx5Core_VERSION VERSION_GREATER_EQUAL 5.1.10)
+    set(WOWTYPE_HAVE_CANDIDATE_ACTIONS ON)
+    target_compile_definitions(wowtype PRIVATE WOWTYPE_HAVE_CANDIDATE_ACTIONS=1)
 endif()
 
 target_include_directories(wowtype PRIVATE
@@ -133,9 +140,10 @@ if(WOWTYPE_DATA_DIR)
             DESTINATION "${CMAKE_INSTALL_DATADIR}/wowtype" OPTIONAL)
     endforeach()
 endif()
-# 自检工具 wowtype-check、wowtype-show：和核心库一起由 cargo 编在同一个目录
+# 自检工具 wowtype-check、wowtype-show 和跨设备复制粘贴的配对工具 wowtype-sync：
+# 和核心库一起由 cargo 编在同一个目录
 get_filename_component(_wowtype_cargo_dir "${WOWTYPE_CORE_LIB}" DIRECTORY)
-foreach(_wowtype_tool wowtype-check wowtype-show)
+foreach(_wowtype_tool wowtype-check wowtype-show wowtype-sync)
     install(PROGRAMS "${_wowtype_cargo_dir}/${_wowtype_tool}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}" OPTIONAL)
 endforeach()
@@ -214,6 +222,10 @@ if(WOWTYPE_BUILD_TESTS)
         "（globalconfig.h：${WOWTYPE_FCITX_GLOBALCONFIG_H}）")
     if(_wowtype_password_option)
         target_compile_definitions(wowtype-key-harness PRIVATE WOWTYPE_HAVE_PASSWORD_IM_OPTION=1)
+    endif()
+    # 候选的右键菜单（#229）：插件编进去了才测
+    if(WOWTYPE_HAVE_CANDIDATE_ACTIONS)
+        target_compile_definitions(wowtype-key-harness PRIVATE WOWTYPE_HAVE_CANDIDATE_ACTIONS=1)
     endif()
 
     # 设置契约：导出 WowtypeConfig 的键、默认值、范围、可选值，scripts/test-config-contract.py 对照 spec/config.json

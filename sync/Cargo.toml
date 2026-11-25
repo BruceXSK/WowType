@@ -1,0 +1,22 @@
+[package]
+name = "wowtype-sync"
+version = "0.7.13"
+edition = "2021"
+rust-version = "1.70"
+description = "WowType 跨设备剪贴板：配对、端到端加密、局域网直连和自建中转"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# 配对码换密钥（SPAKE2）。纯 Rust，没有 C 依赖
+spake2 = "0.4"
+# 剪贴板内容的加密（XChaCha20-Poly1305）
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+# 系统的随机数
+getrandom = "0.2"
+serde_json = "1"
+# 找各个网卡的广播地址（getifaddrs）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1706,6 +1706,11 @@ impl UserLexicon {
         self.user.read().map(|u| u.list.clone()).unwrap_or_default()
     }
 
+    /// word 在不在用户词库里（学到的、手动加的；不算自定义词）。
+    pub fn contains(&self, word: &str) -> bool {
+        self.user.read().is_ok_and(|u| u.pos.contains_key(word))
+    }
+
     /// 用户词 word 的（拼音, 频次），不是用户词是 None。
     pub fn entry(&self, word: &str) -> Option<(String, f64)> {
         let user = self.user.read().ok()?;

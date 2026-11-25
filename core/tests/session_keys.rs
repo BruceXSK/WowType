@@ -23,6 +23,11 @@ use wowtype_core::{Converter, Engine, Lexicon, MemoryLexicon};
 
 /// 按一串键，和 key_harness 的 type() 一样：<sp> <bs> <cr> <esc> 等是特殊键，其余按字符。
 fn type_keys(session: &mut Session, keys: &str) -> Frame {
+    type_keys_with(session, keys, |key| key)
+}
+
+/// [`type_keys`]，每个键先过一遍 adjust（带上外壳报的周围文字、输入框情况）。
+fn type_keys_with(session: &mut Session, keys: &str, adjust: impl Fn(Key) -> Key) -> Frame {
     let mut frame = session.frame(false);
     let mut rest = keys;
     while let Some(c) = rest.chars().next() {
@@ -50,6 +55,7 @@ fn type_keys(session: &mut Session, keys: &str) -> Frame {
             rest = &rest[c.len_utf8()..];
             Key::char(c)
         };
+        let key = adjust(key);
         frame = session.key(&key);
         // 外壳每个键都送按下和松开，松开不该改变编辑区
         let release = Key {
@@ -258,6 +264,11 @@ fn fixed_time() -> Option<LocalTime> {
 }
 
 fn with(engine: &'static Engine) -> Session<'static> {
+    with_engine(engine)
+}
+
+/// 借用调用方自己的引擎（不必为了 `'static` 泄漏它）。
+fn with_engine(engine: &Engine) -> Session<'_> {
     let mut session = Session::with_engine(engine);
     session.set_clock(fixed_time);
     session
@@ -1475,6 +1486,99 @@ fn ctrl_delete_keeps_custom_words_and_idle_is_not_ours() {
     let mut idle = with(engine);
     assert!(!idle.key(&ctrl(keysym::DELETE)).handled);
     assert!(!idle.key(&ctrl(keysym::BACKSPACE)).handled);
+}
+
+/// 右键「忘掉这个词」（#229）：按全部候选里的序号忘，和光标在它上面按 Ctrl+Delete 一样，只是光标不挪。
+#[test]
+fn forget_by_index_keeps_cursor_and_page() {
+    let engine = forget_engine();
+    for _ in 0..3 {
+        let mut session = with(engine);
+        type_keys(&mut session, "shuang");
+        choose_text(&mut session, "霜");
+    }
+    let mut session = with(engine);
+    let before = type_keys(&mut session, "shuang<right>");
+    assert_eq!(texts(&mut session), ["霜", "双"]);
+    assert_eq!(before.cand_cursor, Some(1));
+    assert!(session.can_forget(0), "选过的词能忘");
+    assert!(!session.can_forget(1), "没学过的不给菜单");
+    assert!(!session.can_forget(2), "越界");
+    let frame = session.frame(false);
+    assert_eq!(frame.cand_cursor, Some(1), "can_forget 不动候选框");
+
+    // 没学过的：handled，但什么也不忘
+    let frame = session.forget(1);
+    assert!(frame.handled && !frame.forgot);
+    assert_eq!(texts(&mut session), ["霜", "双"]);
+
+    let frame = session.forget(0);
+    assert!(frame.handled && frame.forgot, "忘掉了要告诉外壳存盘");
+    assert_eq!(frame.commit, None);
+    assert_eq!(frame.preedit, before.preedit, "编辑区不动");
+    assert_eq!(frame.cand_cursor, Some(1), "光标不挪");
+    assert_eq!(session.input(), "shuang");
+    assert_eq!(texts(&mut session), ["双", "霜"], "回到原来的位置");
+    assert_eq!(engine.history_count("霜"), 0);
+    assert!(!session.can_forget(0) && !session.can_forget(1), "没东西可忘了");
+
+    // 越界的不算
+    assert!(!session.forget(2).handled);
+}
+
+/// 一段一段选出来、进了用户词库的词，在第二页上也按序号忘掉，候选框停在第二页。
+#[test]
+fn forget_by_index_removes_user_word_on_later_page() {
+    let engine = forget_engine();
+    for _ in 0..2 {
+        let mut session = with(engine);
+        type_keys(&mut session, "shuangpinge");
+        choose_text(&mut session, "霜");
+        choose_text(&mut session, "频");
+        choose_text(&mut session, "阁");
+    }
+    assert!(engine.user_words().iter().any(|(_, w, _)| w == "霜频阁"));
+    let mut session = with(engine);
+    session.configure(Config { page_size: 1, ..Config::default() });
+    type_keys(&mut session, "shuangpinge");
+    let index = texts(&mut session).iter().position(|t| t == "霜频阁").expect("学过的词");
+    let other = texts(&mut session).iter().position(|t| t == "双拼个");
+    let frame = type_keys(&mut session, "=");
+    assert_eq!(frame.cand_start, 1, "翻到第二页");
+    assert!(session.can_forget(index));
+    if let Some(other) = other {
+        assert!(!session.can_forget(other), "没选过的整句");
+    }
+    let frame = session.forget(index);
+    assert!(frame.handled && frame.forgot);
+    assert_eq!(frame.cand_start, 1, "停在原来那一页");
+    assert!(!engine.user_words().iter().any(|(_, w, _)| w == "霜频阁"));
+    assert!(!texts(&mut session).first().is_some_and(|t| t == "霜频阁"));
+}
+
+/// 自定义词、计算结果、没在打字时不给「忘掉这个词」，按序号忘也什么都不做。
+#[test]
+fn forget_by_index_skips_custom_plain_and_idle() {
+    let engine = forget_engine();
+    engine.lexicon().set_custom_tsv("shuang\t爽\n");
+    let mut session = with(engine);
+    type_keys(&mut session, "shuang");
+    assert_eq!(texts(&mut session)[0], "爽");
+    assert!(!session.can_forget(0));
+    let frame = session.forget(0);
+    assert!(frame.handled && !frame.forgot);
+    assert_eq!(texts(&mut session)[0], "爽");
+
+    let mut idle = with(engine);
+    assert!(!idle.can_forget(0));
+    assert!(!idle.forget(0).handled);
+
+    let mut calc = with(self::engine());
+    type_keys(&mut calc, "v");
+    calc.append("1+2");
+    assert_eq!(calc.candidates()[0].kind, CandidateKind::Plain);
+    assert!(!calc.can_forget(0));
+    assert!(!calc.forget(0).forgot);
 }
 
 #[test]
@@ -2819,6 +2923,10 @@ fn wubi_never_learns_or_forgets_pinyin_words() {
     let frame = session.key(&forget);
     assert!(frame.handled && !frame.forgot);
     assert!(engine.user_words().iter().any(|(_, w, _)| w == "你好"));
+    // 右键菜单也不给「忘掉这个词」，按序号忘同样什么都不忘
+    assert!(!session.can_forget(0));
+    assert!(!session.forget(0).forgot);
+    assert!(engine.user_words().iter().any(|(_, w, _)| w == "你好"));
     // 选词、数字选词、回车、切输入法都不学
     for keys in ["wqvb<sp>", "wqvb2", "wq<cr>"] {
         let mut session = wubi_with(engine, wubi_config());
@@ -3151,6 +3259,73 @@ fn raw_letters_committed_with_enter_are_not_learned() {
     assert_eq!(frame.commit.as_deref(), Some("拼ge"));
     assert_eq!(engine.history_count("ge"), 0);
     assert!(engine.history_count("拼") >= 1);
+}
+
+/// 从候选框里选未收录的英文原串（#297）：选够 3 次收进用户英文词表，以后小写也还原大小写、
+/// 排到首选；回车上屏的不算，退格撤销第三次选择时也退回没学。
+#[test]
+fn selected_english_original_is_learned() {
+    let lexicon: Arc<dyn Lexicon> = Arc::new(
+        MemoryLexicon::from_tsv_str("ge\t个\t1000\nda\t大\t1000\nhe\t和\t1000\n").unwrap(),
+    );
+    let engine = Engine::new(lexicon, Arc::new(BigramLm::default()));
+
+    // 回车三次不算学会
+    for _ in 0..3 {
+        let mut session = with_engine(&engine);
+        assert_eq!(
+            type_keys(&mut session, "Verah<cr>").commit.as_deref(),
+            Some("Verah")
+        );
+    }
+    assert_eq!(engine.learned_english("verah"), None, "回车上屏的原始串不学");
+
+    // 候选框里选三次：收下
+    for _ in 0..3 {
+        let mut session = with_engine(&engine);
+        type_keys(&mut session, "Verah");
+        assert_eq!(
+            choose_text(&mut session, "Verah").commit.as_deref(),
+            Some("Verah")
+        );
+    }
+    assert_eq!(engine.learned_english("verah").as_deref(), Some("Verah"));
+    let mut session = with_engine(&engine);
+    type_keys(&mut session, "verah");
+    assert_eq!(texts(&mut session)[0], "Verah", "{:?}", texts(&mut session));
+
+    // 上屏后紧接着退格：撤销第三次选择，退回还没收下
+    let lexicon: Arc<dyn Lexicon> = Arc::new(
+        MemoryLexicon::from_tsv_str("ge\t个\t1000\nda\t大\t1000\nhe\t和\t1000\n").unwrap(),
+    );
+    let undo_engine = Engine::new(lexicon, Arc::new(BigramLm::default()));
+    for _ in 0..2 {
+        undo_engine.record_english_selection("Verah");
+    }
+    let mut session = with_engine(&undo_engine);
+    type_keys(&mut session, "Verah");
+    assert_eq!(
+        choose_text(&mut session, "Verah").commit.as_deref(),
+        Some("Verah")
+    );
+    assert_eq!(
+        undo_engine.learned_english("verah").as_deref(),
+        Some("Verah")
+    );
+    type_keys(&mut session, "<bs>");
+    assert_eq!(
+        undo_engine.learned_english("verah"),
+        None,
+        "退格要撤销第三次选择"
+    );
+
+    // Ctrl+Delete 忘掉以后回到没学过的样子
+    let mut session = with_engine(&engine);
+    type_keys(&mut session, "verah");
+    assert_eq!(texts(&mut session)[0], "Verah");
+    assert!(session.key(&ctrl(keysym::DELETE)).forgot);
+    assert_eq!(engine.learned_english("verah"), None);
+    assert_eq!(texts(&mut session)[0], "个大和");
 }
 
 /// 还没选词的部分有长度上限：超出的键吃掉，不进编辑区，也不漏给应用。
@@ -3886,4 +4061,318 @@ fn auto_pair_off_by_default_and_halfwidth() {
     let f = type_keys(&mut session, "(");
     assert!(!f.handled);
     assert_eq!(f.cursor_delta, 0);
+}
+
+// ---- 互译只翻一句（#191，TranslateOneShot）：双击 Shift 进「译」翻一句就回去 ----
+
+/// 停顿够了、请求发出去，翻译器译完了 text。
+fn translated(session: &mut Session, t: &FakeTranslator, text: &str) {
+    session.tick(100_000);
+    t.set(wowtype_core::translate::JobState::Done, text);
+}
+
+/// 开着双击 Shift 不切换（#253）、配好了翻译器的会话；one_shot 是互译只翻一句。
+fn one_shot_session(t: &'static FakeTranslator, one_shot: bool) -> Session<'static> {
+    let mut session = with(engine());
+    session.set_translator(Some(t));
+    session.configure(Config {
+        translate_mode: true,
+        shift_double_tap: true,
+        translate_one_shot: one_shot,
+        ..Config::default()
+    });
+    session
+}
+
+/// 在 at 双击 Shift（两下隔 250 毫秒），返回第二下松开的 frame。
+fn double_tap(session: &mut Session, at: u64) -> Frame {
+    tap_shift(session, at);
+    tap_shift(session, at + 250).1
+}
+
+/// 在 at 单按 Shift，等过了双击间隔（tick），返回切了的那个 frame。
+fn single_tap(session: &mut Session, at: u64) -> Frame {
+    use wowtype_core::session::SHIFT_DOUBLE_TAP_MS;
+    tap_shift(session, at);
+    session.tick(at + 80 + SHIFT_DOUBLE_TAP_MS)
+}
+
+#[test]
+fn one_shot_off_keeps_double_tap_doing_nothing() {
+    use wowtype_core::session::Mode;
+    let t: &'static FakeTranslator = Box::leak(Box::default());
+    // 关着（默认）：双击两下都不算，单按照旧 中 → 英 → 译 → 中
+    let mut session = one_shot_session(t, false);
+    let frame = double_tap(&mut session, 1000);
+    assert!(!frame.handled && !frame.mode_changed && frame.mode == Mode::Chinese);
+    assert!(!session.tick(9000).mode_changed);
+    let modes: Vec<Mode> = (1..=3).map(|i| single_tap(&mut session, 10_000 * i).mode).collect();
+    assert_eq!(modes, [Mode::English, Mode::Translate, Mode::Chinese]);
+    // 「译」常驻：译文上屏后不回去，「译」里双击也不动
+    single_tap(&mut session, 50_000);
+    single_tap(&mut session, 60_000);
+    assert_eq!(session.mode(), Mode::Translate);
+    assert!(!double_tap(&mut session, 70_000).mode_changed);
+    type_keys(&mut session, "nihao<sp>");
+    translated(&mut session, t, "Hello");
+    let frame = session.key(&Key::press(keysym::RETURN));
+    assert_eq!(frame.commit.as_deref(), Some("Hello"));
+    assert!(!frame.mode_changed && frame.mode == Mode::Translate);
+    // 开着但没配好互译（没有「译」）：和关着一样，双击两下都不算
+    let mut session = double_tap_session();
+    session.configure(Config { shift_double_tap: true, translate_one_shot: true, ..Config::default() });
+    assert!(!double_tap(&mut session, 1000).mode_changed);
+    assert!(!session.tick(9000).mode_changed);
+    assert_eq!(single_tap(&mut session, 10_000).mode, Mode::English);
+    assert_eq!(single_tap(&mut session, 20_000).mode, Mode::Chinese);
+}
+
+#[test]
+fn one_shot_single_shift_skips_translate() {
+    use wowtype_core::session::Mode;
+    let t: &'static FakeTranslator = Box::leak(Box::default());
+    let mut session = one_shot_session(t, true);
+    let modes: Vec<Mode> = (1..=3).map(|i| single_tap(&mut session, 10_000 * i).mode).collect();
+    assert_eq!(modes, [Mode::English, Mode::Chinese, Mode::English], "单按只在中英之间切");
+}
+
+#[test]
+fn one_shot_double_tap_translates_once_and_returns() {
+    use wowtype_core::session::Mode;
+    for start in [Mode::Chinese, Mode::English] {
+        for commit_key in [keysym::RETURN, keysym::SPACE] {
+            let t: &'static FakeTranslator = Box::leak(Box::default());
+            let mut session = one_shot_session(t, true);
+            session.set_mode(start);
+            let (_, first) = tap_shift(&mut session, 1000);
+            assert!(!first.mode_changed && first.mode == start, "第一下先等着");
+            let (_, second) = tap_shift(&mut session, 1250);
+            assert!(second.handled && second.mode_changed, "双击进「译」");
+            assert_eq!(second.mode, Mode::Translate, "从{start:?}双击进「译」");
+            assert_eq!(second.wake_after_ms, 0, "不用再等双击");
+            assert!(!session.tick(9000).mode_changed, "过了时间也不再切");
+            type_keys(&mut session, "nihao<sp>");
+            assert_eq!(session.translate_source(), "你好");
+            translated(&mut session, t, "Hello");
+            let frame = session.key(&Key::press(commit_key));
+            assert_eq!(frame.commit.as_deref(), Some("Hello"));
+            assert!(frame.handled && frame.mode_changed);
+            assert_eq!(frame.mode, start, "译文上屏后回到原来的模式");
+            assert!(frame.translate.is_none());
+        }
+    }
+}
+
+#[test]
+fn one_shot_returns_after_pending_translation_commits_in_tick() {
+    use wowtype_core::session::Mode;
+    use wowtype_core::translate::JobState;
+    let t: &'static FakeTranslator = Box::leak(Box::default());
+    let mut session = one_shot_session(t, true);
+    session.set_mode(Mode::English);
+    double_tap(&mut session, 1000);
+    type_keys(&mut session, "nihao<sp>");
+    let frame = session.key(&Key::press(keysym::RETURN));
+    assert_eq!(frame.commit, None, "还没译好，先等着");
+    assert_eq!(frame.mode, Mode::Translate);
+    t.set(JobState::Done, "Hello");
+    let frame = session.tick(5000);
+    assert_eq!(frame.commit.as_deref(), Some("Hello"));
+    assert!(frame.mode_changed, "外壳跟着 tick 的 frame 切回去");
+    assert_eq!(frame.mode, Mode::English);
+}
+
+#[test]
+fn one_shot_abandon_returns() {
+    use wowtype_core::session::Mode;
+    let t: &'static FakeTranslator = Box::leak(Box::default());
+    // Esc 清空原文：回原模式，什么都不上屏
+    let mut session = one_shot_session(t, true);
+    session.set_mode(Mode::English);
+    double_tap(&mut session, 1000);
+    type_keys(&mut session, "nihao<sp>");
+    let frame = session.key(&Key::press(keysym::ESCAPE));
+    assert!(frame.handled && frame.mode_changed);
+    assert_eq!((frame.mode, frame.commit.as_deref()), (Mode::English, None));
+    assert_eq!(session.translate_source(), "");
+    // 还什么都没打就按 Esc：也回去
+    let mut session = one_shot_session(t, true);
+    double_tap(&mut session, 1000);
+    let frame = session.key(&Key::press(keysym::ESCAPE));
+    assert!(frame.handled && frame.mode_changed && frame.mode == Mode::Chinese);
+    // 打拼音途中 Esc 只清拼音，还在「译」里；再按一下回去
+    let mut session = one_shot_session(t, true);
+    double_tap(&mut session, 1000);
+    type_keys(&mut session, "ni");
+    let frame = session.key(&Key::press(keysym::ESCAPE));
+    assert!(!frame.mode_changed && frame.mode == Mode::Translate && !session.composing());
+    assert_eq!(session.key(&Key::press(keysym::ESCAPE)).mode, Mode::Chinese);
+    // Shift+回车上屏原文：回原模式
+    let mut session = one_shot_session(t, true);
+    double_tap(&mut session, 1000);
+    type_keys(&mut session, "nihao<sp>");
+    let shift_enter = Key { modifiers: modifier::SHIFT, ..Key::press(keysym::RETURN) };
+    let frame = session.key(&shift_enter);
+    assert_eq!(frame.commit.as_deref(), Some("你好"));
+    assert!(frame.mode_changed && frame.mode == Mode::Chinese);
+    // 单按 Shift：不翻了，回原模式（英文），原文原样上屏（和离开「译」一样）
+    let mut session = one_shot_session(t, true);
+    session.set_mode(Mode::English);
+    double_tap(&mut session, 1000);
+    type_keys(&mut session, "nihao<sp>");
+    let frame = single_tap(&mut session, 5000);
+    assert!(frame.mode_changed);
+    assert_eq!((frame.mode, frame.commit.as_deref()), (Mode::English, Some("你好")));
+    // 「译」里再双击：一样回去，接着单按照常切中英
+    let mut session = one_shot_session(t, true);
+    double_tap(&mut session, 1000);
+    let frame = double_tap(&mut session, 5000);
+    assert!(frame.mode_changed && frame.mode == Mode::Chinese);
+    assert_eq!(single_tap(&mut session, 9000).mode, Mode::English);
+}
+
+#[test]
+fn one_shot_double_tap_carries_pinyin_into_translate() {
+    use wowtype_core::session::Mode;
+    let t: &'static FakeTranslator = Box::leak(Box::default());
+    let mut session = one_shot_session(t, true);
+    type_keys(&mut session, "nihao");
+    let (_, first) = tap_shift(&mut session, 1000);
+    assert!(first.commit.is_none() && !first.mode_changed, "第一下先等着，拼音不上屏");
+    let (_, second) = tap_shift(&mut session, 1250);
+    assert!(second.mode_changed && second.mode == Mode::Translate);
+    assert_eq!(second.commit, None, "什么都不上屏");
+    assert!(session.composing(), "拼音带进「译」接着打");
+    assert!(second.cand_count > 0, "接着出候选");
+    type_keys(&mut session, "<sp>");
+    assert_eq!(session.translate_source(), "你好");
+    // 单按（没等来第二下）：和以前一样切英文，字母原样上屏
+    let mut session = one_shot_session(t, true);
+    type_keys(&mut session, "nihao");
+    let frame = single_tap(&mut session, 1000);
+    assert_eq!((frame.mode, frame.commit.as_deref()), (Mode::English, Some("nihao")));
+}
+
+#[test]
+fn one_shot_translate_key_set_mode_and_password_field() {
+    use wowtype_core::session::{key_hints::NO_TRANSLATE, KeyAction::ToggleTranslate, Mode};
+    let t: &'static FakeTranslator = Box::leak(Box::default());
+    // 互译键进的「译」也只翻一句
+    let mut session = one_shot_session(t, true);
+    session.configure(Config {
+        translate_mode: true,
+        translate_key: true,
+        shift_double_tap: true,
+        translate_one_shot: true,
+        ..Config::default()
+    });
+    session.set_mode(Mode::English);
+    let frame = session.key(&hotkey(ToggleTranslate, 0));
+    assert!(frame.handled && frame.mode_changed && frame.mode == Mode::Translate);
+    type_keys(&mut session, "nihao<sp>");
+    translated(&mut session, t, "Hello");
+    let frame = session.key(&Key::press(keysym::RETURN));
+    assert_eq!((frame.mode, frame.commit.as_deref()), (Mode::English, Some("Hello")));
+    // 再按互译键：回到进来前的模式
+    session.key(&hotkey(ToggleTranslate, 0));
+    assert_eq!(session.key(&hotkey(ToggleTranslate, 0)).mode, Mode::English);
+    // 设了互译键时双击 Shift 也进得去
+    assert_eq!(double_tap(&mut session, 20_000).mode, Mode::Translate);
+    // 外面定的「译」（外壳全局的模式、外部命令）也只翻一句
+    let mut session = one_shot_session(t, true);
+    session.set_mode(Mode::English);
+    session.set_mode(Mode::Translate);
+    type_keys(&mut session, "nihao<sp>");
+    translated(&mut session, t, "Hello");
+    assert_eq!(session.key(&Key::press(keysym::RETURN)).mode, Mode::English);
+    // 密码框里双击进不了「译」：两下都不算
+    let mut session = one_shot_session(t, true);
+    assert!(!session.key(&Key { hints: NO_TRANSLATE, ..Key::press(keysym::ESCAPE) }).handled);
+    let frame = double_tap(&mut session, 1000);
+    assert!(!frame.mode_changed && frame.mode == Mode::Chinese);
+    assert!(!session.tick(9000).mode_changed);
+}
+
+/// 带着周围文字（光标前是 prev）按一串键，和外壳每个键都报的情形一样。
+fn type_with_prev(session: &mut Session, keys: &str, prev: Option<char>) -> Frame {
+    use wowtype_core::session::key_hints::SURROUNDING;
+    type_keys_with(session, keys, |key| Key { prev_char: prev, hints: SURROUNDING, ..key })
+}
+
+#[test]
+fn punct_not_halved_by_lagging_surrounding() {
+    // Electron 类应用报周围文字慢好几拍（#295）：词上屏以后还报着上屏前的 '1'，
+    // 别拿旧的把句号定成半角（1:1复刻。）
+    let mut session = with(engine());
+    assert!(!type_with_prev(&mut session, "1", None).handled, "数字原样交给应用");
+    assert_eq!(type_with_prev(&mut session, "nihao<sp>", Some('1')).commit.as_deref(), Some("你好"));
+    assert_eq!(
+        type_with_prev(&mut session, ".", Some('1')).commit.as_deref(),
+        Some("。"),
+        "报来的还是上屏前的 '1'：应用没跟上，按会话记的「好」算"
+    );
+    // 慢不止一拍：接着打的还报着 '1'
+    assert_eq!(type_with_prev(&mut session, ",", Some('1')).commit.as_deref(), Some("，"));
+    // 接着打数字（交给应用，会话自己记着）：后面的点是数字里的，保持英文
+    assert!(!type_with_prev(&mut session, "3", Some('1')).handled);
+    assert!(!type_with_prev(&mut session, ".", Some('1')).handled, "3 后面的点保持英文");
+
+    // 应用如实报了上屏的字：照常
+    let mut session = with(engine());
+    type_with_prev(&mut session, "1", None);
+    type_with_prev(&mut session, "nihao<sp>", Some('1'));
+    assert_eq!(type_with_prev(&mut session, ".", Some('好')).commit.as_deref(), Some("。"));
+
+    // 光标真的在数字后面（没上过屏）：保持英文
+    let mut session = with(engine());
+    assert!(!type_with_prev(&mut session, "3", None).handled);
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled, "数字后的点保持英文");
+}
+
+#[test]
+fn moved_cursor_is_not_taken_for_lagging_surrounding() {
+    // 上屏以后报来的是别的字（不是上屏前的那个）：光标真的挪了，信应用的
+    let mut session = with(engine());
+    type_with_prev(&mut session, "nihao<sp>", Some('x'));
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled, "光标挪到了 3 后面，点保持英文");
+
+    // 上屏以后按了方向键（交给应用）：之后光标前是什么会话不知道，报来的当真
+    let mut session = with(engine());
+    type_with_prev(&mut session, "3", None);
+    type_with_prev(&mut session, "nihao<sp>", Some('3'));
+    assert!(!type_with_prev(&mut session, "<left><left>", Some('3')).handled);
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled, "挪回 3 后面，点保持英文");
+
+    // 失去焦点、点鼠标（外壳调 reset）：也不再当成慢了的
+    let mut session = with(engine());
+    type_with_prev(&mut session, "3", None);
+    type_with_prev(&mut session, "nihao<sp>", Some('3'));
+    session.reset(false);
+    assert!(!type_with_prev(&mut session, ".", Some('3')).handled);
+}
+
+#[test]
+fn lagging_surrounding_keeps_context_and_mouse_choice() {
+    // 上文也一样：应用还报着上屏前的那个字时，不把会话记的上文换掉
+    let mut session = with(context_engine());
+    type_with_prev(&mut session, "bu<sp>", Some('x'));
+    type_with_prev(&mut session, "ma", Some('x'));
+    assert_eq!(texts(&mut session)[0], "骂", "应用没跟上，上文「不」留着");
+    type_with_prev(&mut session, "<esc>", Some('x'));
+    // 跟上了以后光标前真的是别的字：上文换成它
+    type_with_prev(&mut session, "ma", Some('好'));
+    assert_eq!(texts(&mut session)[0], "吗");
+
+    // 光标前没有字的不算：空输入框里上屏、应用又清空了（聊天框点了发送），上文作废
+    let mut session = with(context_engine());
+    type_with_prev(&mut session, "bu<sp>", None);
+    type_with_prev(&mut session, "ma", None);
+    assert_eq!(texts(&mut session)[0], "吗", "输入框清空了，不拿上一次上屏的「不」当上文");
+
+    // 鼠标点候选上屏的也算（不经过按键）
+    let mut session = with(engine());
+    type_with_prev(&mut session, "1", None);
+    type_with_prev(&mut session, "nihao", Some('1'));
+    assert_eq!(choose_text(&mut session, "你好").commit.as_deref(), Some("你好"));
+    assert_eq!(type_with_prev(&mut session, ".", Some('1')).commit.as_deref(), Some("。"));
 }

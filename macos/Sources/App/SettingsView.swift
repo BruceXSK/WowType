@@ -239,6 +239,10 @@ private let keyboardSettingsURL = URL(string: "x-apple.systempreferences:com.app
 
 /// 两个快捷键行的说明，和 Linux 设置的一样（settings/wowtype-config 的 TOGGLE_KEY_INFO、TRANSLATE_MODE_KEY_INFO）
 private let toggleKeyInfo = "按它在中文、英文之间切（在「译」里按回到中文）。单按 Shift 照常能用。"
+/// 「翻译」页「双击 Shift 单次互译」的说明（和 Linux 设置的一样，#191）
+private let oneShotInfo = "打开后单按 Shift 只在中文、英文之间切；很快连按两下 Shift（或按互译的快捷键）进「译」，只翻这一句："
+    + "译文上屏、Esc、Shift+回车或单按 Shift 放弃以后，回到原来的中文或英文。拼音打到一半时连按两下，打的拼音带进「译」接着打。\n\n"
+    + "关着时和以前一样：单按 Shift 在 中 → 英 → 译 之间切，连按两下 Shift 不切换。"
 private let translateModeKeyInfo = "按它进「译」，在「译」里再按回到原来的模式。设了它，单按 Shift 就只在中文、英文之间切。\n\n"
     + "要先在「翻译」页打开互译；没打开、密码框里这个键交给应用。"
 private let systemKeyNote = "\n\n系统的快捷键（比如 Control+空格）先处理，设成它们 WowType 收不到。"
@@ -548,6 +552,10 @@ private struct InputPage: View {
                       info: "候选里也列出极少用的生僻字。系统自带的字体一般显示不了，会是方块。",
                       isOn: $model.config.rareExtChars)
             RowDivider()
+            SwitchRow(title: "输入框里的拼音用空格分音节", subtitle: "ni hao，不用 ni'hao；候选框里照旧",
+                      info: "网页里的代码块（比如 ChatGPT）会把 ' 当引号上色，边打边重画，可能留下半截拼音。遇到这种情况时打开。",
+                      isOn: $model.config.inlineSpaceSeparator)
+            RowDivider()
             SwitchRow(title: "中文标点自动配对", subtitle: "打（【《「“‘ 时自动补上右半边",
                       info: "中文标点下打左括号、左引号，上屏成对的，光标放到中间；"
                           + "在里面打完再按右半边，跳过补好的那个，不会多出一个。"
@@ -594,6 +602,7 @@ private struct InputPage: View {
                 SwitchRow(title: "汉字和数字之间", isOn: $model.config.autoSpaceDigits)
             }
         }
+        SyncGroup(model: model)
     }
 
     /// 快捷键下拉框选的键名（同 wowtype.conf）；空串是不用
@@ -638,6 +647,106 @@ private struct InputPage: View {
 
     private var lexiconColor: Color? {
         model.lexiconKind == .custom && model.customLexiconMissing ? palette.warning : nil
+    }
+}
+
+/// 跨设备复制粘贴（docs/SYNC.md）：开关、配对（显示配对码 / 输入配对码 / 取消配对），中转服务这些收进
+/// 「更多选项」。和 Linux 设置的一样；配对的状态在 SyncSettings。
+private struct SyncGroup: View {
+    @ObservedObject var model: SettingsModel
+    @StateObject private var sync = SyncSettings()
+    @State private var code = ""
+    @State private var token = ""
+
+    private static let guide = URL(string: "https://github.com/Gloridust/WowType/tree/main/relay/cloudflare")!
+
+    var body: some View {
+        PrefGroup("跨设备复制粘贴",
+                  info: "一台电脑上复制的文字，在另一台装了 WowType 的电脑上直接粘贴：按 Command+V，"
+                      + "或者打 v 再按空格，在「剪贴板」里选。只传文字（最多 16 KB），不传图片和文件。\n\n"
+                      + "没有账号，也不经过 WowType 的服务器。两台设备用 6 位配对码配一次对，之后的内容都在设备上加密，"
+                      + "只有配过对的设备解得开。\n\n"
+                      + "同一个局域网里设备之间直接传（防火墙要放行 39217 端口的 UDP 和 TCP）。"
+                      + "不在同一个局域网时，可以自己部署一个中转服务（Cloudflare Worker，免费套餐够用），它只看得到密文。\n\n"
+                      + "密码管理器标了「不要记」的不传，没标的密码会被传过去。",
+                  links: [("怎么部署中转服务", Self.guide)]) {
+            SwitchRow(title: "跨设备复制粘贴", isOn: $model.config.clipboardSync)
+            RowDivider()
+            HStack(spacing: 8) {
+                RowLabel(title: "配对", subtitle: sync.summary)
+                Button(sync.hosting ? "取消" : "显示配对码") {
+                    sync.toggleCode(config: model.config) { model.showToast($0) }
+                }
+                .disabled(sync.busy)
+                if sync.paired && !sync.hosting {
+                    Button("取消配对") { sync.unpair { model.showToast($0) } }
+                        .disabled(sync.busy)
+                }
+            }
+            .rowPadding()
+            RowDivider()
+            HStack(spacing: 8) {
+                RowLabel(title: "输入另一台设备上显示的配对码")
+                TextField("6 位数字", text: $code)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 110)
+                    .onSubmit(join)
+                Button("配对", action: join)
+                    .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .rowPadding()
+            .disabled(sync.hosting || sync.busy)
+            RowDivider()
+            ExpanderRow(title: "更多选项") {
+                SwitchRow(title: "同一个局域网里直接传", isOn: $model.config.clipboardSyncLan)
+                RowDivider()
+                TextRow(title: "中转服务地址", subtitle: "不用就留空", placeholder: "https://…",
+                        text: trimmed(\.clipboardSyncRelayUrl))
+                RowDivider()
+                HStack(spacing: 8) {
+                    RowLabel(title: "中转服务的访问口令", subtitle: sync.tokenSet ? "已设置（不显示）" : nil)
+                    SecureField(sync.tokenSet ? "换一个" : "部署时设的口令", text: $token)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                        .onSubmit(saveToken)
+                    Button("保存", action: saveToken)
+                        .disabled(token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if sync.tokenSet {
+                        Button("删除") { sync.setToken("") { model.showToast($0) } }
+                    }
+                }
+                .rowPadding()
+                RowDivider()
+                HStack(spacing: 8) {
+                    RowLabel(title: "测试中转服务", subtitle: sync.pingResult)
+                    Button("测试") { sync.ping(config: model.config) }
+                        .disabled(sync.busy)
+                }
+                .rowPadding()
+                RowDivider()
+                TextRow(title: "这台设备的名字", placeholder: sync.defaultName,
+                        text: trimmed(\.clipboardSyncDeviceName))
+                RowDivider()
+                SwitchRow(title: "收到的放进系统剪贴板", subtitle: "关掉以后只出现在 v + 空格的「剪贴板」里",
+                          isOn: $model.config.clipboardSyncPaste)
+            }
+        }
+    }
+
+    private func join() {
+        sync.join(code: code, config: model.config, toast: { model.showToast($0) }, done: { code = "" })
+    }
+
+    private func saveToken() {
+        let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        sync.setToken(value) { model.showToast($0) }
+        token = ""
+    }
+
+    private func trimmed(_ path: WritableKeyPath<WowtypeConfig, String>) -> Binding<String> {
+        Binding(get: { model.config[keyPath: path] },
+                set: { model.config[keyPath: path] = $0.trimmingCharacters(in: .whitespacesAndNewlines) })
     }
 }
 
@@ -729,6 +838,11 @@ private struct VoicePage: View {
                 .disabled(!ready)
             RowDivider()
             PickerRow(title: "语音键", selection: $model.config.voiceKey, options: voiceKeyOptions)
+                .disabled(!ready || !model.config.voice)
+            RowDivider()
+            PickerRow(title: VoiceSilence.title, subtitle: VoiceSilence.info,
+                      selection: $model.config.voiceSilenceTimeout,
+                      options: VoiceSilence.options(current: model.config.voiceSilenceTimeout))
                 .disabled(!ready || !model.config.voice)
             RowDivider()
             SwitchRow(title: "同时复制到剪贴板", isOn: $model.config.voiceCopy)
@@ -832,6 +946,9 @@ private struct TranslatePage: View {
                   + "回车用译文，Shift+回车用原文，Esc 取消。打的是外文就翻成中文。") {
             SwitchRow(title: "互译", subtitle: translateStatus, isOn: $model.config.translate)
             RowDivider()
+            SwitchRow(title: "双击 Shift 单次互译", subtitle: "单按 Shift 只切中英，翻完一句自动回来",
+                      info: oneShotInfo, isOn: $model.config.translateOneShot)
+            RowDivider()
             PickerRow(title: "翻译成", info: "中文翻成这种语言；这种语言（和别的外文）翻成中文。",
                       selection: $model.config.translateTarget, options: translateLanguages)
             RowDivider()
@@ -857,13 +974,14 @@ private struct TranslatePage: View {
         if !model.translateConfigured {
             return model.config.translateLocal ? "先在下面下载翻译模型" : "先在下面填好翻译服务"
         }
+        let oneShot = model.config.translateOneShot
         if let key = model.config.translateModeKey {
-            return "按 \(key.label) 进出「译」"
+            return "按 \(key.label) 进出「译」" + (oneShot && model.config.shiftToggle != .off ? "，双击 Shift 也行" : "")
         }
         if model.config.shiftToggle == .off {
             return "「输入」页关掉了 Shift 切换，切不到「译」；可以在那里设一个互译的快捷键"
         }
-        return "单按 Shift：中 → 英 → 译 → 中"
+        return oneShot ? "双击 Shift 翻一句，单按只切中英" : "单按 Shift：中 → 英 → 译 → 中"
     }
 
     private var serviceGroup: some View {
@@ -954,9 +1072,9 @@ private struct TranslatePage: View {
 
     /// 选了本地模型：一行状态（下载 / 进度 / 已就绪），别的都收进「更多选项」；说明和许可在组标题旁的 ⓘ
     private var localGroup: some View {
-        PrefGroup("离线翻译模型", info: "腾讯混元的翻译模型 HY-MT。翻译时占 1.5 GB 左右内存，一会儿不用就自动释放。"
+        PrefGroup("离线翻译模型", info: "腾讯混元的翻译模型 Hy-MT3。翻译时占 2 GB 左右内存，一会儿不用就自动释放。"
                   + "找不到 llama-server 时一起下载 llama.cpp 官方的（MIT 许可）。\n\n" + LocalModel.terms,
-                  links: [("许可协议全文", URL(string: LocalModel.license)!)]) {
+                  links: [("许可全文", URL(string: LocalModel.license)!)]) {
             LocalModelRow(model: model)
             RowDivider()
             ExpanderRow(title: "更多选项") {
@@ -1057,7 +1175,8 @@ private struct ModelPicker: View {
     }
 }
 
-/// 本地模型那一行：没下载给「下载」和大小，下载中给进度和「取消」，好了写「已就绪」。
+/// 本地模型那一行：没下载给「下载」和大小，下载中给进度和「取消」，好了写「已就绪」；
+/// 还在用上一代模型时给「升级」。
 private struct LocalModelRow: View {
     @ObservedObject var model: SettingsModel
     @Environment(\.palette) private var palette
@@ -1073,6 +1192,10 @@ private struct LocalModelRow: View {
                     .monospacedDigit()
                     .foregroundColor(.secondary)
                 Button("取消") { model.cancelLocalDownload() }
+            } else if plan.canUpgrade {
+                Text("在用上一代的 \(LocalModel.legacyName)，可以升级到 Hy-MT3（\(LocalModel.sizeText(LocalModel.size))）")
+                    .foregroundColor(.secondary)
+                Button("升级") { model.downloadLocalModel() }
             } else if plan.ready {
                 Label("已就绪", systemImage: "checkmark.circle.fill")
                     .foregroundColor(palette.accentText)

@@ -125,6 +125,19 @@ def run(app):
         win.font_row.set_value(14)
     step("数字框", spin)
 
+    def voice_silence():
+        # 语音页的「停顿多久自动结束」：默认 1.5 秒，选「不自动结束」存成 0，再选回来
+        row = win.silence_row
+        check(row.get_title() == "停顿多久自动结束", "停顿的名字不对")
+        check(win.voice_silence_values[row.get_selected()] == "1500", "停顿默认不是 1.5 秒")
+        row.set_selected(win.voice_silence_values.index("0"))
+        check(win.values["VoiceSilenceTimeout"] == "0", "不自动结束没存成 0")
+        row.set_selected(win.voice_silence_values.index("10000"))
+        check(win.values["VoiceSilenceTimeout"] == "10000", "10 秒没存成 10000")
+        row.set_selected(0)
+        check(win.values["VoiceSilenceTimeout"] == "1500", "没改回 1.5 秒")
+    step("停顿多久自动结束", voice_silence)
+
     def arrow_keys():
         # 「方向键」的副标题跟着用法和候选排列走
         win.layout_row.set_selected(1)
@@ -326,6 +339,28 @@ def run(app):
         check(win.values["TranslateLocal"] == "True", "换回本地没写 TranslateLocal=True")
     step("翻译引擎", translate_engine)
 
+    def one_shot():
+        # 双击 Shift 单次互译（#191）：打开以后「互译」那一行说双击 Shift 翻一句（上面「开关」一步翻过它，先关上）
+        row = win.one_shot_row
+        row.set_active(False)
+        ready, conflicts = win.translate_ready, getattr(win, "shift_conflicts", [])
+        win.translate_ready = lambda: True
+        win.shift_conflicts = []
+        try:
+            row.set_active(True)
+            check(win.values["TranslateOneShot"] == "True", "单次互译没存上")
+            check(win.translate_row.get_subtitle() == "双击 Shift 翻一句，单按只切中英",
+                  f"互译那一行没跟着变：{win.translate_row.get_subtitle()}")
+            row.set_active(False)
+            check(win.values["TranslateOneShot"] == "False", "关掉单次互译没存上")
+            check(win.translate_row.get_subtitle() == "单按 Shift：中 → 英 → 译 → 中",
+                  f"关掉后互译那一行没变回来：{win.translate_row.get_subtitle()}")
+        finally:
+            win.translate_ready = ready
+            win.shift_conflicts = conflicts
+            win.refresh_translate_status()
+    step("双击 Shift 单次互译", one_shot)
+
     def dialog(name, action, answer=None):
         def go():
             for w in new_windows(win, action):
@@ -340,6 +375,170 @@ def run(app):
     dialog("清除打字统计（取消）", lambda: win.stats_clear(None))
     dialog("删语音模型（取消）", lambda: win.on_voice_delete(None))
     dialog("下载离线翻译模型（取消）", lambda: win.on_local_download(None))
+
+    def local_upgrade():
+        # 升级前下载过上一代翻译模型：照旧算下载好了，按钮变成「升级」，确认框能取消
+        models = ns["MODELS_DIR"]
+        os.makedirs(models, exist_ok=True)
+        legacy = os.path.join(models, ns["LEGACY_MODEL_FILE"])
+        with open(legacy, "wb") as f:
+            f.write(b"gguf")
+        saved = win.values["TranslateLlamaServer"]
+        win.values["TranslateLlamaServer"] = sys.executable  # 当成找到了 llama-server
+        try:
+            win.refresh_local_translate()
+            check(win.local_ready(), "只有上一代模型时应该算下载好了")
+            check(win.local_download.get_visible() and win.local_download.get_label() == "升级",
+                  f"上一代模型没给「升级」：{win.local_download.get_label()}")
+            check("上一代" in win.local_model_row.get_subtitle(), win.local_model_row.get_subtitle())
+            for w in new_windows(win, lambda: win.on_local_download(None)):
+                w.close()
+            check(win.local_cancel is None and os.path.isfile(legacy), "取消升级不该动旧模型")
+            # 真升级一遍（下载地址换成本机的假服务）：新模型下好、校验过了，旧模型和它的半截都删掉
+            import hashlib
+            import http.server
+            import threading
+            blob = os.urandom(200_000)
+
+            class Handler(http.server.BaseHTTPRequestHandler):
+                def log_message(self, *_a):
+                    pass
+
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(blob)))
+                    self.end_headers()
+                    self.wfile.write(blob)
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            config = type(win).start_local_download.__globals__
+            pinned = config["LOCAL_MODEL_URL"], config["LOCAL_MODEL_SHA256"]
+            config["LOCAL_MODEL_URL"] = f"http://127.0.0.1:{server.server_address[1]}/m.gguf"
+            config["LOCAL_MODEL_SHA256"] = hashlib.sha256(blob).hexdigest()
+            new = os.path.join(models, ns["LOCAL_MODEL_FILE"])
+            with open(legacy + ".part", "wb") as f:
+                f.write(b"half")
+            try:
+                win.start_local_download(True)
+                check(win.local_cancel is not None, "升级没开始下载")
+                check(pump_until(lambda: win.local_cancel is None, 60), "升级没下完")
+                check(os.path.isfile(new) and open(new, "rb").read() == blob, "新模型没下到 models/")
+                check(not os.path.exists(legacy) and not os.path.exists(legacy + ".part"),
+                      "新模型下好以后旧模型没删掉")
+                check(os.listdir(models) == [ns["LOCAL_MODEL_FILE"]], f"models/ 里多了东西：{os.listdir(models)}")
+                check(win.local_ready() and not win.local_download.get_visible()
+                      and "已下载" in win.local_model_row.get_subtitle(),
+                      f"升级完应该是已下载：{win.local_model_row.get_subtitle()}")
+            finally:
+                config["LOCAL_MODEL_URL"], config["LOCAL_MODEL_SHA256"] = pinned
+                server.shutdown()
+                if os.path.exists(new):
+                    os.unlink(new)
+        finally:
+            win.values["TranslateLlamaServer"] = saved
+            for path in (legacy, legacy + ".part"):
+                if os.path.exists(path):
+                    os.unlink(path)
+            win.refresh_local_translate()
+        check(win.local_download.get_label() == "下载", "没有模型时按钮应该是「下载」")
+    step("上一代翻译模型给升级，升级完删掉旧的", local_upgrade)
+
+    def clipboard_sync():
+        # 跨设备复制粘贴：设置界面这台和命令行起的两台「设备」真配一次对（都在本机，直接连，不靠广播）
+        import subprocess
+        tool = ns["sync_tool"]()
+        if not tool:
+            print("skip 跨设备复制粘贴（没有 wowtype-sync）")
+            return
+        state_file = ns["SYNC_STATE_FILE"]
+        check(state_file.startswith(home), f"配对文件不在临时目录里：{state_file}")
+        check(ns["sync_devices"]() == (False, []), "一开始应该没配对")
+        check("还没有配对" in win.sync_pair_row.get_subtitle(), win.sync_pair_row.get_subtitle())
+        check(not win.sync_unpair_button.get_visible(), "没配对时不该有「取消配对」")
+
+        # 前面的步骤把开关都拨过一遍：局域网关着、又没有中转服务时配不了对（会提示至少开一个）
+        win.values["ClipboardSyncLan"] = "False"
+        win.on_sync_host(None)
+        check(pump_until(lambda: win.sync_host is None, 30), "两条路都没开时应该马上结束")
+        check(win.sync_host_info is None and not os.path.exists(state_file), "两条路都没开不该出配对码")
+        win.values["ClipboardSyncLan"] = "True"
+
+        # 配对码不是 6 位数字：不去找设备
+        win.sync_code_row.set_text("12 34")
+        win.on_sync_join(win.sync_code_row)
+        check(not win.sync_busy, "配对码不对不该开始配对")
+
+        # 1. 另一台显示配对码，这边输入
+        other = os.path.join(home, "other.json")
+        host = subprocess.Popen([tool, "pair-host", "--state", other, "--name", "另一台"],
+                                stdout=subprocess.PIPE, text=True, encoding="utf-8")
+        _word, code, _ttl, address = host.stdout.readline().split()
+        os.environ["WOWTYPE_SYNC_PAIR_HOST"] = "127.0.0.1:" + address.rsplit(":", 1)[1]
+        try:
+            win.sync_code_row.set_text(f"{code[:3]} {code[3:]}")
+            win.on_sync_join(win.sync_code_row)
+            check(win.sync_busy and not win.sync_code_row.get_sensitive(), "配对时输入框应该灰掉")
+            check(pump_until(lambda: not win.sync_busy, 30), "输入配对码以后一直没结果")
+        finally:
+            del os.environ["WOWTYPE_SYNC_PAIR_HOST"]
+        check(host.wait(timeout=10) == 0 and host.stdout.read().strip() == "paired " + os.uname().nodename,
+              "另一台没配上")
+        check(ns["sync_devices"]() == (True, ["另一台"]), f"配对文件不对：{ns['sync_devices']()}")
+        check("已经和 另一台 配对" in win.sync_pair_row.get_subtitle(), win.sync_pair_row.get_subtitle())
+        check(win.sync_unpair_button.get_visible() and win.sync_code_row.get_text() == "",
+              "配上以后应该能取消配对、输入框清空")
+        check(os.stat(state_file).st_mode & 0o777 == 0o600, "配对文件应该只有自己能读")
+
+        # 2. 这边显示配对码，第三台输入；先试一次取消
+        win.on_sync_host(None)
+        check(pump_until(lambda: win.sync_host_info is not None, 30), "没显示出配对码")
+        check("配对码" in win.sync_pair_row.get_subtitle() and win.sync_host_button.get_label() == "取消",
+              win.sync_pair_row.get_subtitle())
+        win.on_sync_host(None)
+        check(pump_until(lambda: win.sync_host is None, 30), "取消以后进程没结束")
+        check(ns["sync_devices"]() == (True, ["另一台"]), "取消配对码不该动配对文件")
+        win.on_sync_host(None)
+        check(pump_until(lambda: win.sync_host_info is not None, 30), "没显示出配对码")
+        code, address = win.sync_host_info
+        third = os.path.join(home, "third.json")
+        joined = subprocess.run([tool, "pair-join", code, "--state", third, "--name", "第三台",
+                                 "--host", "127.0.0.1:" + address.rsplit(":", 1)[1]],
+                                capture_output=True, text=True, encoding="utf-8", timeout=60)
+        check(joined.returncode == 0, joined.stdout)
+        check(pump_until(lambda: win.sync_host is None, 30), "配上以后没收尾")
+        check(ns["sync_devices"]() == (True, ["另一台", "第三台"]), f"{ns['sync_devices']()}")
+        # 三台拿到的是同一把组密钥
+        keys = {json.load(open(path, encoding="utf-8"))["group_key"] for path in (state_file, other, third)}
+        check(len(keys) == 1 and None not in keys, "三台设备的组密钥不一样")
+
+        # 3. 中转服务的访问口令单独存 0600 的文件；地址不对时测试说得出原因（不联网）
+        win.sync_token_row.set_text("relay-token")
+        pump(0.8)
+        key_file = ns["SYNC_RELAY_KEY_FILE"]
+        check(open(key_file).read() == "relay-token\n" and os.stat(key_file).st_mode & 0o777 == 0o600,
+              "访问口令没存成只有自己能读的文件")
+        win.on_sync_ping(None)
+        check(not win.sync_busy, "没填地址不该去测")
+        win.sync_relay_row.set_text("http://relay.example.com")
+        win.on_sync_ping(None)
+        check(pump_until(lambda: not win.sync_busy, 30), "测试中转服务一直没结果")
+        check("https://" in win.sync_ping_row.get_subtitle(), win.sync_ping_row.get_subtitle())
+        check(win.values["ClipboardSyncRelayUrl"] == "http://relay.example.com", "地址没记下来")
+        win.sync_relay_row.set_text("")
+        win.sync_token_row.set_text("")
+        pump(0.8)
+        check(not os.path.exists(key_file), "口令清空以后文件应该删掉")
+
+        # 4. 取消配对：只动这台
+        for w in new_windows(win, lambda: win.on_sync_unpair(None)):
+            w.close()
+        check(ns["sync_devices"]()[0], "关掉确认框不该取消配对")
+        win.sync_run([tool, "unpair", "--state", state_file], lambda ok, text: check(ok, text))
+        check(pump_until(lambda: not win.sync_busy, 30), "取消配对一直没结果")
+        check(ns["sync_devices"]() == (False, []) and not win.sync_unpair_button.get_visible(),
+              "取消配对以后应该回到没配对")
+        check(json.load(open(other, encoding="utf-8"))["group_key"], "取消配对不该动别的设备")
+    step("跨设备复制粘贴：配对、取消、中转服务的口令", clipboard_sync)
     dialog("恢复默认设置（确定）", win.on_reset, answer=1)
     dialog("导出日志（取消）", win.on_export_log)
     dialog("导入自定义词（取消）", win.on_import_words)

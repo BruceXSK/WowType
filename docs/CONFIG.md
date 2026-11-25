@@ -35,6 +35,11 @@ dbus-send --session --dest=org.fcitx.Fcitx5 /controller \
 **哔哩哔哩（免费，不用 API Key）**，或者**自定义翻译服务**（填一个 OpenAI 格式、`chat/completions` 的接口），再打开「互译」，
 单按 Shift 就在 **中 → 英 → 译 → 中** 之间切换（没填好服务时只在中英之间切）。
 也可以在「输入」页设一个**互译的快捷键**（`TranslateModeKey`，比如 `Ctrl+Shift+Y`）：按它进「译」，在「译」里再按回到原来的模式（中文或英文）；设了以后单按 Shift 只在中英之间切。
+
+不想每次都 Shift 一路切过去、翻完再切回来，在「翻译」页打开「**双击 Shift 单次互译**」（`TranslateOneShot=True`，#191）：
+单按 Shift 只在中英之间切；0.35 秒内连按两下 Shift（或按互译的快捷键）进「译」，只翻这一句，
+译文上屏后自动回到原来的中文或英文（`Esc`、`Shift+回车`、单按 Shift 算放弃，一样回去；在「译」里再双击也回去）。
+拼音打到一半时双击，打的拼音会带进「译」接着打。关着（默认）时和以前一样：连按两下 Shift 不切换（JetBrains 的双击 Shift）。
 左 Shift 被 fcitx5 拿去「临时切换输入法」时切不到「译」，用右 Shift，或在设置「输入」页打开「Shift 只给 WowType 用」。
 
 切到「译」后照常打中文，用起来和微信输入法的「中英互译」一样：打的字攒在候选框里（顶上写着「中→英 互译」），
@@ -92,10 +97,10 @@ dbus-send --session --dest=org.fcitx.Fcitx5 /controller \
 ### 本地模型（离线）
 
 不想把字发出去，可以在「翻译」页的「翻译引擎」里选「本地翻译（离线）」（设置里默认就是它），用腾讯混元的翻译模型
-[HY-MT 1.5 1.8B](https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF)（Q4_K_M，1.13 GB）在本机翻：
+[Hy-MT3 1.8B](https://huggingface.co/tencent/Hy-MT3-1.8B-GGUF)（Q4_K_M，1.35 GB）在本机翻：
 
-- 模型点「下载」获取，放在 `~/.local/share/wowtype/models/`（`TranslateLocalModel` 写了位置就下到那里），下载完校验 SHA256，断了再点会接着下（接着下时不用再确认许可）。两端一样。
-  命令行也行：`wowtype-config --download-model`（加 `--accept-license` 跳过确认）。
+- 模型点「下载」获取，放在 `~/.local/share/wowtype/models/`（`TranslateLocalModel` 写了位置就下到那里），下载完校验 SHA256，断了再点会接着下（接着下时不用再确认）。两端一样。
+  命令行也行：`wowtype-config --download-model`。
 - 跑模型用 llama.cpp 的 `llama-server`，不用自己装：系统里没有时，下载模型会顺带从
   [llama.cpp 的发布页](https://github.com/ggml-org/llama.cpp/releases)下载官方程序（x86_64 约 22 MB、
   arm64 约 18 MB，MIT 许可，钉死一个版本并校验 SHA256），解到 `~/.local/share/wowtype/llama/`，
@@ -104,10 +109,12 @@ dbus-send --session --dest=org.fcitx.Fcitx5 /controller \
   NixOS 跑不了官方程序，设置里不提供下载，在系统配置里装 `pkgs.llama-cpp`。
 - 第一次翻译时才启动 `llama-server`（只监听 127.0.0.1 的随机端口，载入要几秒），
   闲置 `TranslateIdleMinutes` 分钟（默认 5）后停掉，内存还回去；关掉互译或退出 fcitx5 时也停。
-  翻译时 llama-server 占 1.5 GB 左右内存，一句话 1–3 秒。
-- **许可**：模型用的是腾讯混元社区许可协议（Tencent HY Community License），不是开源协议。
-  它**不适用于欧盟、英国和韩国**；月活超过 1 亿的产品要另找腾讯授权。WowType 不分发这个模型，
-  是你自己从 Hugging Face 下载，下载前设置界面会让你确认。[协议全文](https://huggingface.co/tencent/HY-MT1.5-1.8B/blob/main/License.txt)
+  翻译时 llama-server 占 2 GB 左右内存，一句话 1–3 秒。
+- **许可**：Hy-MT3 是 Apache-2.0 许可，没有地区限制。WowType 不分发这个模型，是你自己从 Hugging Face 下载。
+  [许可全文](https://huggingface.co/tencent/Hy-MT3-1.8B-GGUF/blob/main/LICENSE.txt)
+- **以前下载过 HY-MT 1.5 的**（0.7.11 及以前的默认模型，`models/HY-MT1.5-1.8B-Q4_K_M.gguf`）：照旧能用，不用重新下载。
+  设置里那一行会写「在用上一代的 HY-MT 1.5」，点「升级」下载 Hy-MT3，下载期间照旧用旧的翻译，下好、校验过了才删掉旧文件。
+  HY-MT 1.5 用的是腾讯混元社区许可协议，不适用于欧盟、英国和韩国。
 
 ## v + 空格：工具栏
 
@@ -157,6 +164,7 @@ FuzzyUnIong=False
 FuzzyEngOng=False
 TypoCorrection=True
 RareExtChars=False
+InlineSpaceSeparator=False
 InputScheme=Quanpin
 ShuangpinScheme=Ziranma
 ShuangpinShowKeys=False
@@ -174,12 +182,18 @@ DateTime=True
 Calculator=True
 Toolbar=True
 ClipboardHistory=False
+ClipboardSync=False
+ClipboardSyncLan=True
+ClipboardSyncRelayUrl=
+ClipboardSyncDeviceName=
+ClipboardSyncPaste=True
 AutoSpace=False
 AutoSpaceLetters=True
 AutoSpaceDigits=True
 AutoPairPunct=False
 Voice=True
 VoiceKey=Alt_R
+VoiceSilenceTimeout=1500
 VoiceCopy=False
 EmojiSuggest=True
 EmojiKey=Super+period
@@ -190,6 +204,7 @@ TranslateTarget=en
 TranslateBaseUrl=
 TranslateModel=
 TranslateFormal=False
+TranslateOneShot=False
 TranslateLocal=True
 TranslateLocalModel=
 TranslateLlamaServer=
@@ -207,12 +222,15 @@ Lexicon=
 | `CandidateLayout` | `Horizontal` 横排、`Vertical` 竖排 |
 | `ArrowKeys` | 打字途中方向键做什么（#129），设置界面里叫「方向键」：`Candidates`「都用来选词」（默认），跟着候选排列，横排 `←` `→` 选词、`↑` 上一页、`↓` 展开更多候选，竖排 `↑` `↓` 选词、`←` `→` 翻页；`Caret`「左右键移动光标」，横排竖排都是 `↑` `↓` 选词（到了一页的两头接着翻页），`←` `→` 在拼音里移动光标：打的字母插在光标处，退格删光标前一个，`Home`、`End`、`Delete` 也管光标，到了两头再按什么也不做；方向键不翻页，翻页用 `PgUp` `PgDn` 和翻页键，横排也不展开面板。双拼时光标在中间，编辑区显示打的键；「译」里拼音在原文框里，没有光标 |
 | `PageSize` | 每页候选个数，3–9 |
-| `Fuzzy`、`TypoCorrection`、`Traditional`、`DateTime`、`Calculator`、`Toolbar`、`ClipboardHistory`、`Voice`、`VoiceCopy`、`EmojiSuggest`、`Translate`、`TranslateFormal`、`CheckUpdate`、`BetaUpdates`、`TypingStats` | `True` / `False` |
+| `VoiceSilenceTimeout` | 点按说话（点一下语音键开始说）时没声音多久自动结束，毫秒，0–60000，默认 `1500`（1.5 秒）。设置「语音」页里叫「停顿多久自动结束」，能选 1.5、3、5、10、30 秒和「不自动结束」（`0`：只有再点一下语音键才结束，`Esc` 取消）。一次最长录 2 分钟，到了照常出结果。长按说话松开就结束，不受这一项影响（#285） |
+| `Fuzzy`、`TypoCorrection`、`Traditional`、`DateTime`、`Calculator`、`Toolbar`、`ClipboardHistory`、`Voice`、`VoiceCopy`、`EmojiSuggest`、`Translate`、`TranslateFormal`、`TranslateOneShot`、`CheckUpdate`、`BetaUpdates`、`TypingStats` | `True` / `False` |
+| `ClipboardSync`、`ClipboardSyncLan`、`ClipboardSyncRelayUrl`、`ClipboardSyncDeviceName`、`ClipboardSyncPaste` | [跨设备复制粘贴](SYNC.md)：总开关（默认关）、局域网直连（默认开）、自建中转服务的地址（空着不用）、这台设备的名字（空着用主机名）、收到的也放进系统剪贴板（默认开）。配对在设置界面里做，组密钥存在 `~/.config/wowtype/sync.json`，中转服务的访问口令存在 `~/.config/wowtype/sync-relay.key`（macOS、Windows 在各自的数据目录里），都不写进 `wowtype.conf`。Windows 没有最后一项，收到的总是放进系统剪贴板 |
 | `AutoSpace`、`AutoSpaceLetters`、`AutoSpaceDigits` | 中英文之间自动加空格：总开关（默认关）、汉字和字母之间、汉字和数字之间。要应用报告光标前的文字才生效（终端等不支持），密码、网址、邮箱输入框不加 |
 | `AutoPairPunct` | 中文标点自动配对，默认关，在设置的「输入」页（「拼音」那一组）打开。中文标点下打 `(` `[` `<` `{` `"` `'` 上屏成对的（）【】《》「」“”‘’，光标放到中间；在里面打完再按右半边（`)` `]` `>` `}` `"` `'`）不再多上屏一个，而是跳过补好的那个（打拼音途中按的先上屏候选），数字后面也一样：`(` `3` `)` 是（3）。可以套着打（“”）。里面空着时按退格两个一起删。里面打字、空格、退格都不打断配对；按了方向键、`Home` `End`、回车、`Tab`、`Delete`、快捷键，换了窗口、点鼠标挪了光标（应用重置输入法）以后不再跳过。数字后面的左括号照常是半角（`3(`），不配对；互译、半角标点时不配对。Linux 上光标靠插件给应用发方向键挪；macOS 上没有挪光标的接口（发方向键要「辅助功能」权限），靠输入法按位置换字：把光标要停的位置前面那个字原样换一遍，光标就落在那里（和长按出重音字母一样的接口），所以只在应用告诉输入法光标在哪、读得到光标旁边的字时配对，终端这类应用里、空的输入框里第一个字照常一个一个上屏。应用报告光标前后文字时，跳过、一起删之前还核对右边确实是补好的那个 |
 | `FuzzyZh`、`FuzzyCh`、`FuzzySh`、`FuzzyNL`、`FuzzyFH`、`FuzzyRL`、`FuzzyAn`、`FuzzyEn`、`FuzzyIn`、`FuzzyIan`、`FuzzyUan`、`FuzzyUn`、`FuzzyAnAi`、`FuzzyHuangWang`、`FuzzyUnIong`、`FuzzyEngOng` | 模糊音的各组（z=zh、c=ch、s=sh、n=l、f=h、r=l、an=ang、en=eng、in=ing、ian=iang、uan=uang、un=ong、an=ai、huang=wang、un=iong、eng=ong），`Fuzzy` 打开时才生效 |
 | `SelectKeys` | 分号、引号选词：`Off`、`Semicolon`（`;` 选第 2 个）、`SemicolonQuote`（再加 `'` 选第 3 个，引号不再当隔音符） |
 | `RareExtChars` | 也出 CJK 扩展 B 区及以后的单字（比如 `hou` 的 𠯜），默认关：常见中文字体（Noto CJK、思源、苹方）都没有这些字，列出来是方块。打开前先装能显示它们的字体，比如 Ubuntu / Debian 的 `fonts-hanazono`。通用规范汉字表里的扩展区字（𬭩、𫚔，约 200 个，常见字体都有）和含这些字的词（𩽾𩾌）不受这个开关影响 |
+| `InlineSpaceSeparator` | 拼音写在输入框里时（fcitx5 开着「在程序中显示预编辑文本」，macOS、Windows 一直是）音节之间用空格（`ni hao`），不用 `'`（`ni'hao`）；候选框里照旧用 `'`。网页里的代码块（比如 ChatGPT）语法高亮会把 `'…'` 当字符串，边打边重画，可能留下半截拼音（#247），遇到时打开。默认 `False` |
 | `PickChar` | 以词定字：打拼音时 `[` 上屏光标处候选的第一个字、`]` 上屏最后一个字，默认开；翻页键设成 `[ ]` 时让给翻页 |
 | `Association` | 联想：选词、整句上屏以后给出一页常跟在后面的词（词级模型里的，加上自己用过的搭配）。按 `Tab` 进联想行，再用空格、回车、数字上屏，`Esc` 退出，也能用鼠标点；没按 `Tab` 时接着打字、数字、标点、空格、回车都照常（数字不选联想，中文后面常接着打数字）。五笔、互译、密码框里不出。默认关（0.5.0 预发布时默认开），在设置的「输入」页打开 |
 | `SettingsTheme`、`SettingsAccent` | 设置窗口自己的主题和强调色（「常规 → 设置窗口」），只管设置窗口，不管候选框，输入法不读；Linux、macOS、Windows 三端都有，选项一样，见下面的[设置窗口的主题和强调色](#设置窗口的主题和强调色) |
@@ -230,12 +248,13 @@ Lexicon=
 | `PunctuationStyle` | 标点样式，设置界面「输入 → 默认状态 → 默认全角/半角」：`Fullwidth` 全角中文标点（默认）、`Halfwidth` 半角英文标点 |
 | `VoiceKey` | fcitx5 的键名，如 `Alt_R`、`Control_R`、`Menu`、`F8` |
 | `ToggleKey` | 另设一个切换中 / 英文的快捷键（fcitx5 键名，如 `Control+Shift+space`），留空不用；单按 Shift 照常。在「译」里按回到中文。fcitx5 自己的全局快捷键先处理：`Control+space` 默认是 fcitx5「切换启用/禁用输入法」的键（macOS 上是系统「选择上一个输入法」的键），设成它 WowType 收不到，所以设置里不再列它；Linux 设置界面会提示被 fcitx5 占着的键 |
-| `TranslateModeKey` | 进出「译」的快捷键（如 `Control+Shift+Y`），留空不用：按它进「译」（打到一半的拼音带进去），在「译」里再按回到进来前的模式；设了以后单按 Shift 只在中 ↔ 英之间切（在「译」里单按回中文）。互译没打开、翻译没配好、密码框里这个键交给应用。和 `ToggleKey` 设成同一个键时算这个 |
+| `TranslateModeKey` | 进出「译」的快捷键（如 `Control+Shift+Y`），留空不用：按它进「译」（打到一半的拼音带进去；开着 `TranslateOneShot` 时只翻一句），在「译」里再按回到进来前的模式；设了以后单按 Shift 只在中 ↔ 英之间切（在「译」里单按回中文）。互译没打开、翻译没配好、密码框里这个键交给应用。和 `ToggleKey` 设成同一个键时算这个 |
+| `TranslateOneShot` | 双击 Shift 单次互译（#191），默认 `False`：和以前一样，连按两下 Shift 不切换。`True`：单按 Shift 只在中 ↔ 英之间切，0.35 秒内连按两下 Shift 进「译」；双击、`TranslateModeKey` 进的「译」都只翻一句，译文上屏、`Esc`、`Shift+回车`、单按 Shift 以后回到进来前的模式。设置里在「翻译」页，三端一样 |
 | `EmojiKey` | 表情面板快捷键，fcitx5 的键名，如 `Super+period`、`Control+semicolon`；留空不用快捷键。macOS 上默认 `Control+period`，`Super` 当 `Control`（见 [macOS](#macos)） |
 | `TranslateTarget` | 互译语言：`en` 英、`ja` 日、`ko` 韩、`fr` 法、`de` 德、`es` 西、`ru` 俄、`pt` 葡、`it` 意、`vi` 越、`th` 泰、`id` 印尼、`ar` 阿 |
 | `TranslateBaseUrl`、`TranslateModel` | 翻译服务（OpenAI 格式）的地址和模型，见[互译](#互译)。地址是 `https://index-translate.bilibili.com/v1` 时是[哔哩哔哩](#哔哩哔哩index-translate)，模型可以空着（用 `Index-Translate-2B`）、不用 Key |
 | `TranslateLocal` | `True` 用本地模型（默认），`False` 用 `TranslateBaseUrl` 的翻译服务（哔哩哔哩或自定义，见[翻译引擎](#翻译引擎)）。配置文件里没写这一项、又填了 `TranslateBaseUrl` 时当 `False`（0.3.10 及以前填过翻译服务的照旧用服务）；Linux 插件、设置界面和 macOS 都这样 |
-| `TranslateLocalModel` | 本地模型文件，留空用 `~/.local/share/wowtype/models/HY-MT1.5-1.8B-Q4_K_M.gguf`，见[本地模型](#本地模型离线) |
+| `TranslateLocalModel` | 本地模型文件，留空用 `~/.local/share/wowtype/models/Hy-MT3-1.8B-Q4_K_M.gguf`，见[本地模型](#本地模型离线) |
 | `TranslateLlamaServer` | `llama-server` 的路径，留空先在 `PATH` 里找，再用设置里下载的那份 |
 | `TranslateIdleMinutes` | 本地模型闲置几分钟后释放，0–240，0 表示不自动释放 |
 | `Lexicon` | 词库文件路径，留空用默认的雾凇词库（查找顺序见[数据文件](#数据文件)）。设置界面切到万象时写的是 `~/.local/share/wowtype/dicts/wanxiang/lexicon.tsv`，见[可选词库](#可选词库万象拼音)。文件不存在时退回默认词库；环境变量 `WOWTYPE_LEXICON` 优先 |
@@ -279,6 +298,9 @@ Lexicon=
 | `WOWTYPE_LOG` | 日志文件路径，默认 `~/.local/state/wowtype/wowtype.log`；`0` 不写 |
 | `WOWTYPE_TRANSLATE=1`、`WOWTYPE_TRANSLATE_URL`、`WOWTYPE_TRANSLATE_MODEL`、`WOWTYPE_TRANSLATE_TARGET` | 互译开关、服务地址、模型、语言 |
 | `WOWTYPE_TRANSLATE_KEY_FILE` | 互译 Key 文件，默认 `~/.config/wowtype/translate.key` |
+| `WOWTYPE_CLIPBOARD_SYNC=1` | 打开[跨设备复制粘贴](SYNC.md) |
+| `WOWTYPE_SYNC_STATE_FILE`、`WOWTYPE_SYNC_RELAY_KEY_FILE` | 配对文件和中转服务访问口令文件的位置，默认 `~/.config/wowtype/sync.json`、`~/.config/wowtype/sync-relay.key` |
+| `WOWTYPE_SYNC_LAN_PORT`、`WOWTYPE_SYNC_PEERS`、`WOWTYPE_SYNC_BEACON_MS`、`WOWTYPE_SYNC_PAIR_HOST` | 测试、排查用：换局域网端口（默认 39217）；除了广播还往这些 `地址:端口` 发（逗号分开）；广播间隔（毫秒）；设置界面输入配对码时不靠广播找、直接连这个 `地址:端口` |
 
 临时试一下：`WOWTYPE_FUZZY=1 fcitx5 -r -d`。长期用写进 `~/.config/environment.d/wowtype.conf`，注销重新登录后生效。
 
@@ -300,7 +322,7 @@ macOS 还没有的功能不列；Linux 单独一页的「更新」在「常规�
 窗口开着时在别处改了文件，切回窗口会重新读，不会被窗口里的旧值盖掉。
 改完下一次按键时生效，不用重启；换了 `Lexicon` 会在后台重新载入词库，载完之前照旧用原来的。
 
-现在认的项：`CandidateLayout`、`ArrowKeys`、`PageSize`、`PageKeys*`、`SelectKeys`、`PickChar`、`Association`、`Fuzzy` 和 `Fuzzy*` 各组、`TypoCorrection`、`RareExtChars`、
+现在认的项：`CandidateLayout`、`ArrowKeys`、`PageSize`、`PageKeys*`、`SelectKeys`、`PickChar`、`Association`、`Fuzzy` 和 `Fuzzy*` 各组、`TypoCorrection`、`RareExtChars`、`InlineSpaceSeparator`、
 `InputScheme`、`ShuangpinScheme`、`ShuangpinShowKeys`、`ShuangpinAbbrev`、`WubiAutoCommit`、`WubiHint`、`ShiftToggle`、`InitialMode`、`WindowMode`、`Traditional`、`PunctuationStyle`、`AutoPairPunct`、`DateTime`、`Calculator`、`EmojiSuggest`、
 `AutoSpace*`、`Lexicon`、`Toolbar`、`ClipboardHistory`、`EmojiKey`、`ToggleKey`、`TranslateModeKey`、`Voice`、`VoiceKey`、`VoiceCopy`、`Translate` 和 `Translate*` 各项、`TypingStats`、`SettingsTheme`、`SettingsAccent`，另外有一项只有 macOS 有的 `CandidateFontSize`（候选字号，10–40 磅，默认 17；Linux 上字号跟着 fcitx5 主题）。
 `CheckUpdate`（默认 `True`）：输入法每天最多查一次 GitHub 上的最新正式版（后台，不挡打字），有新版时菜单栏的输入法菜单里多一项
@@ -340,14 +362,14 @@ macOS 还没有的功能不列；Linux 单独一页的「更新」在「常规�
   在「翻译引擎」里选本地翻译、[哔哩哔哩](#哔哩哔哩index-translate)（免费，不用 Key）或自定义翻译服务；自定义的填接口地址和模型（也可以直接改 `wowtype.conf` 里的 `Translate`、`TranslateBaseUrl`、`TranslateModel`）；API Key 也在那一页填，
   存在同一个目录的 `translate.key`（0600，只有自己能读），不写进 `wowtype.conf`。系统开着安全输入（密码框）时照常打中文，不翻译。
 - 本地模型（`TranslateLocal=True`）：和 Linux 一样一键下载。设置窗口「翻译」页选「本地翻译（离线）」，点「下载」，
-  确认许可后模型（1.13 GB）下到数据目录的 `models/`（`TranslateLocalModel` 写了位置就下到那里），下完校验 SHA256，断了再点会接着下；好了那一行写「已就绪」。
+  确认后模型（1.35 GB）下到数据目录的 `models/`（`TranslateLocalModel` 写了位置就下到那里），下完校验 SHA256，断了再点会接着下；好了那一行写「已就绪」。
   找不到 `llama-server` 时一起下载 llama.cpp 官方的 macOS 程序（和 Linux 同一个构建，Apple 芯片约 17 MB、Intel 约 12 MB，MIT 许可，钉死 SHA256），
   只解出 `llama-server` 和它的动态库到数据目录的 `llama/`，跑一次 `--version` 确认能用，不用 `brew install llama.cpp`。
   官方程序要 macOS 13.3 以上，更老的系统要自己装 llama.cpp。
-  命令行也行：`"~/Library/Input Methods/WowType.app/Contents/MacOS/WowType" --download-model`（加 `--accept-license` 跳过确认）。
+  命令行也行：`"~/Library/Input Methods/WowType.app/Contents/MacOS/WowType" --download-model`。
   模型文件的位置（`TranslateLocalModel`）、llama-server 的位置、闲置几分钟释放、删除模型都在「更多选项」里。
   `TranslateLlamaServer` 留空时依次找数据目录的 `llama/llama-server`、`/opt/homebrew/bin`、`/usr/local/bin`、`/opt/local/bin`（输入法是系统启动的，
-  `PATH` 里没有 Homebrew）。模型的许可和上面[本地模型](#本地模型离线)说的一样：不是开源协议，**不适用于欧盟、英国和韩国**。
+  `PATH` 里没有 Homebrew）。模型的许可、以前下载过上一代模型怎么升级，和上面[本地模型](#本地模型离线)说的一样。
 - [语音输入](../README.md#语音输入)用法和 Linux 一样：按住语音键说话，松开就上屏；点一下语音键开始说，停顿一会儿自动上屏；Esc 取消。
   - 语音键默认右 Option（`VoiceKey=Alt_R`，键名和 Linux 一样，一份配置两边通用），还能选右 Control、F8–F10。
     Mac 键盘没有菜单键，Linux 上的 `VoiceKey=Menu` 拷过来不起作用，设置里会标出来。
@@ -382,7 +404,7 @@ macOS 还没有的功能不列；Linux 单独一页的「更新」在「常规�
 | `words.lm` | 词级语言模型（哪些词常连着用），有它长句更准；安装包里自带，见下 |
 | `custom.tsv` | [自定义词](#自定义词)：在设置里加的词 |
 | `user.tsv` | 自动学到的新词：分几次选出来拼成的词（四个字以内，比如「霜」「频」「阁」）30 天里第二次这样拼（或者直接选它）就收进来；一次打出来的词选够 3 次（按 30 天减半的热度算）才收 |
-| `history.tsv` | 输入习惯：选过哪些词、哪些词常连着用、等第二次的候选新词、忘掉的词（Ctrl+Delete） |
+| `history.tsv` | 输入习惯：选过哪些词、哪些词常连着用、等第二次的候选新词、忘掉的词（Ctrl+Delete）、从候选框选过的英文原串 |
 | `emoji-recent.txt` | 最近用过的 emoji（表情面板里排最前） |
 | `stats.json` | [打字统计](#打字统计)（默认关，打开了才有）：每天的字数、各类字符数、活跃毫秒、每个键按下的次数、候选位置，不保存输入内容；旁边的 `stats.clear` 是清空计数 |
 | `lexicon.tsv.wcache` | 词库快照，让第二次启动更快（约 0.1 秒，快照直接映射进内存用）；删了会自动重建 |

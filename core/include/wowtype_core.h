@@ -16,7 +16,7 @@
  * 删函数或改参数含义时升主版本。外壳启动时用 wowtype_abi_version() 比对主版本。
  * 规则见 docs/ABI.md。 */
 #define WOWTYPE_ABI_VERSION_MAJOR 1
-#define WOWTYPE_ABI_VERSION_MINOR 15
+#define WOWTYPE_ABI_VERSION_MINOR 19
 
 #ifdef __cplusplus
 extern "C" {
@@ -260,7 +260,8 @@ const char *wowtype_version(void);
  *
  * 用法：热键按下/松开调 key_down/key_up；录音期间每几十毫秒调一次 poll，
  * 按返回的状态显示提示或上屏 wowtype_voice_text。
- * 按住超过 300ms 松开即结束；更短算点按，继续听到静音 1.5 秒或再按一次热键。
+ * 按住超过 300ms 松开即结束；更短算点按，继续听到静音 1.5 秒（wowtype_voice_set_silence_timeout 可改）
+ * 或再按一次热键。单次最长录 2 分钟，到了照常出结果。
  * 设了环境变量 WOWTYPE_VOICE_WAV 时不开麦克风，改读这个 WAV 文件（测试用）。
  */
 typedef struct WowtypeVoice WowtypeVoice;
@@ -300,6 +301,9 @@ int wowtype_voice_level(const WowtypeVoice *voice);
 int wowtype_voice_model_state(const WowtypeVoice *voice);
 /* 松开热键后还在听（点按模式）时返回 1。 */
 int wowtype_voice_is_tap(const WowtypeVoice *voice);
+/* 点按说话时没声音多久自动结束，毫秒（1.16 起），默认 1500。0 是不因静音结束：只有再按一次热键
+ * （或 cancel、到了单次最长录音 2 分钟）才结束。长按说话不受影响。正在听时改了也马上生效。 */
+void wowtype_voice_set_silence_timeout(WowtypeVoice *voice, unsigned int ms);
 
 /*
  * 互译：调用户配置的大模型（OpenAI 格式 chat/completions，流式）把原文译成外文，
@@ -390,7 +394,7 @@ typedef struct WowtypeSession WowtypeSession;
  * 在「译」里回中文；frame->mode_changed 为 1。开着工具栏、表情面板时别带（按键归面板）。 */
 #define WOWTYPE_KEY_ACTION_TOGGLE_MODE 6
 /* 1.10 起：进出「译」的快捷键（TranslateModeKey）：不在「译」里进「译」（打到一半的拼音带进去），
- * 在「译」里回到进来之前的模式。没有「译」（translate_mode 为 0）或者输入框带
+ * 在「译」里回到进来之前的模式（开着 translate_one_shot 时进的「译」只翻一句，1.17）。没有「译」（translate_mode 为 0）或者输入框带
  * WOWTYPE_KEY_HINT_NO_TRANSLATE 时 frame->handled 为 0，键交给应用。 */
 #define WOWTYPE_KEY_ACTION_TOGGLE_TRANSLATE 7
 
@@ -423,7 +427,8 @@ typedef struct {
 
 /* 输入模式（1.10 起）。单按 Shift（Shift_L 0xffe1 / Shift_R 0xffe2 的按下、松开都交给会话）
  * 在中 → 英 →（WowtypeSessionConfig.translate_mode 时）译 → 中 之间切换，frame->mode_changed 为 1；
- * 设了 translate_key 时只在中 ↔ 英之间切（在「译」里回中文），「译」用 WOWTYPE_KEY_ACTION_TOGGLE_TRANSLATE 进出。
+ * 设了 translate_key 时只在中 ↔ 英之间切（在「译」里回中文），「译」用 WOWTYPE_KEY_ACTION_TOGGLE_TRANSLATE 进出；
+ * 开着 translate_one_shot（1.17）时也只在中 ↔ 英之间切，双击 Shift 进「译」只翻一句。
  * 英文模式下会话只管字母、数字前的自动空格，别的键都交给应用。互译时的上屏还在外壳。 */
 #define WOWTYPE_MODE_CHINESE 0
 #define WOWTYPE_MODE_ENGLISH 1
@@ -498,6 +503,12 @@ typedef struct {
                            * 也算，这个键照切了以后的模式处理）、到了时间（tick）、第二下没算成单按时切，这几个
                            * frame 都可能带 mode_changed（和 commit：打到一半切英文）。按键没带 time_ms 时照旧立刻切。
                            * 默认 0：外壳要会这些才开 */
+    int translate_one_shot; /* 1.17 起：互译只翻一句（#191，translate_mode 时才起作用），默认 0：
+                             * 单按 Shift 只在中 ↔ 英之间切；双击 Shift（要开着 shift_double_tap，0.35 秒以内单按
+                             * 两下，不再两下都不算）、互译键（WOWTYPE_KEY_ACTION_TOGGLE_TRANSLATE）、_set_mode 进的
+                             * 「译」都只翻一句：译文上屏（按过回车、译好了才上屏的在 tick 的 frame 里）、Esc、
+                             * Shift+回车、单按 Shift、在「译」里再双击 / 按互译键都回到进来前的模式（中或英），
+                             * 这些 frame 带 mode_changed，外壳要跟上。打到一半双击：拼音带进「译」接着打 */
 } WowtypeSessionConfig;
 
 /* 一次调用之后外壳要做的事。归会话所有，和里面的字符串一起在同一个会话的下一次调用前有效。
@@ -526,7 +537,9 @@ typedef struct {
                              * 外壳攒够次数存一次用户词库；只上屏了标点、emoji、计算结果、日期时间是 0 */
     int mode;               /* 1.10 起：这次调用以后的输入模式，WOWTYPE_MODE_* */
     int mode_changed;       /* 1.10 起：这次调用切换了输入模式（单按 Shift、wowtype_session_set_mode；
-                             * 1.14 起开着 shift_double_tap 时也可能在 tick、OBSERVE 的 frame 里） */
+                             * 1.14 起开着 shift_double_tap 时也可能在 tick、OBSERVE 的 frame 里；
+                             * 1.17 起开着 translate_one_shot 时「译」里上屏译文、Esc 的 frame，
+                             * 和按过回车、译好了上屏的 tick 的 frame 里也可能有） */
     int translating;        /* 1.10 起：互译中（「译」、有翻译器、输入框能翻译）。上屏的字攒成原文，
                              * 不进 commit；下面四段字只在互译时有内容，否则是空串（不为 NULL） */
     const char *translate_source; /* 攒着的原文（编辑区里画在拼音前面） */
@@ -540,6 +553,8 @@ typedef struct {
     int delete_next;        /* 1.12 起：1 时这次的退格没接（handled 为 0），成对删：外壳除了删光标前的字（退格），
                              * 还要删光标后的右标点（Delete），和挪光标的键走同一条路按顺序发 */
     size_t choice_index;    /* 1.12 起：这次上屏的候选在列表里的位置（1 起）；不是选候选为 0 */
+    size_t cand_start;      /* 1.18 起：显示的第一个候选在全部候选里的序号（显示的第 i 个是 cand_start + i，
+                             * 传给 wowtype_session_can_forget / _forget、_choose 用） */
 } WowtypeFrame;
 
 /* 建会话。engine 可以传 NULL（词库没载入好时也能打字，载入好了用 set_engine 补上）；
@@ -638,6 +653,16 @@ const char *wowtype_session_selected_text(WowtypeSession *session); /* 已选的
  * （1.10 删掉了 wowtype_session_append、_set_context：上文由会话自己记，面板的搜索词也在会话里。） */
 const WowtypeFrame *wowtype_session_choose(WowtypeSession *session, size_t index);
 
+/* 鼠标忘词（1.18 起，#229）：候选上点右键出「忘掉这个词」，和光标在它上面按 Ctrl+Delete 一样。
+ * index 都是全部候选里的序号（和 _choose 一样不分页；显示的第 i 个是 frame->cand_start + i）。
+ * can_forget：第 index 个是学过的词（用户词库里有、有选词热度或学到的搭配）返回 1；词库里本来就有、没学过的，
+ * 设置里加的自定义词，emoji、计算结果、日期时间，五笔码的候选，开着工具栏 / 表情面板 / 联想，越界、NULL 返回 0。
+ * 不改会话，之前拿到的 frame 和候选的字照样有效；外壳据此决定菜单里给不给这一项。
+ * forget：忘掉第 index 个，候选原地重算，编辑区、页码和光标不动；真忘掉了 frame->forgot 为 1（外壳马上存
+ * 用户词库和输入习惯），没东西可忘时什么也不做。没在打字、开着面板 / 联想、序号不对时 handled 为 0。 */
+int wowtype_session_can_forget(WowtypeSession *session, size_t index);
+const WowtypeFrame *wowtype_session_forget(WowtypeSession *session, size_t index);
+
 /* 整个候选列表（不分页）：fcitx5 的候选框（CommonCandidateList）要整个列表，外壳抄过去画。
  * 工具栏、表情面板开着时是面板的条目。 */
 #define WOWTYPE_CAND_WORD 0  /* 引擎的候选：选中要学习 */
@@ -728,6 +753,88 @@ int wowtype_stats_clear(const char *path);
 
 /* 当前 Unix 毫秒。 */
 int64_t wowtype_stats_now_ms(void);
+
+/* ---- 跨设备剪贴板（ABI 1.19 起） ----
+ *
+ * 一台设备上复制的文字，在配过对的另一台设备上可以直接粘贴。内容用配对时换来的组密钥端到端加密，
+ * 走局域网直连和 / 或用户自己部署的中转服务（relay/cloudflare）。配对由设置界面做（wowtype-sync 命令行），
+ * 结果写在配对文件里；这里只管同步，盯着配对文件，变了自己跟上。
+ *
+ * 线程都是核心自己的，下面的函数都不阻塞。外壳要做的：
+ *   1. 设置变了调 wowtype_sync_configure；
+ *   2. 定时（一秒左右）把本机剪贴板现在的文字交给 wowtype_sync_observe（密码框里、标了「机密」的不交）；
+ *      configure 以后第一次交的只当基准，不发——所以剪贴板是空的也要交（交空串），不然开机以后
+ *      第一次复制的会被当成基准吞掉；
+ *   3. 定时调 wowtype_sync_poll 取别的设备复制过来的，想让 Ctrl+V 也能贴就写进系统剪贴板
+ *      （写进去以后 observe 报回来的同一段文字不会再往回发）；
+ *   4. 有按键、切到输入法时调 wowtype_sync_touch（最近没人用就不一直挂着中转服务的连接）。
+ * 核心不带 sync 特性编译时 wowtype_sync_new 返回 NULL，其余什么也不做。 */
+typedef struct WowtypeSync WowtypeSync;
+
+typedef struct WowtypeSyncConfig {
+    uint32_t size;              /* sizeof(WowtypeSyncConfig)；以后只在末尾加字段 */
+    int enabled;                /* 0 = 关（停掉所有线程） */
+    int lan;                    /* 局域网直连 */
+    const char *relay_url;      /* 中转服务的地址；NULL/空串不用 */
+    const char *relay_key_file; /* 放中转服务访问口令的文件（一行）；NULL/空串没有 */
+    const char *state_file;     /* 配对文件（设备编号、组密钥、配过对的设备） */
+    const char *device_name;    /* 这台设备叫什么，显示在别的设备上 */
+} WowtypeSyncConfig;
+
+WowtypeSync *wowtype_sync_new(void);
+void wowtype_sync_free(WowtypeSync *sync);
+void wowtype_sync_configure(WowtypeSync *sync, const WowtypeSyncConfig *config);
+/* 本机剪贴板现在是 text。返回 1 = 发给别的设备了，0 = 没发（没变、是别的设备刚传来的、空白、
+ * 超过 16 KB、没打开或没配对）。 */
+int wowtype_sync_observe(WowtypeSync *sync, const char *text);
+void wowtype_sync_touch(WowtypeSync *sync);
+/* 取一条别的设备复制过来的文字，同时记进剪贴板历史（v + 空格的「剪贴板」里看得到）；没有返回 NULL。
+ * 返回的指针到下一次 wowtype_sync_poll 之前有效。 */
+const char *wowtype_sync_poll(WowtypeSync *sync);
+/* 上一次 wowtype_sync_poll 取到的那条是哪台设备复制的（设备自己起的名字，可能是空串）。 */
+const char *wowtype_sync_from(const WowtypeSync *sync);
+/* 现在的状态，一行 JSON：enabled、paired、devices、lan、lan_port、lan_peers、lan_error、
+ * relay（off / no-token / connecting / ok / error）、relay_error、sent、received、error。
+ * 返回的指针到下一次 wowtype_sync_status 之前有效。 */
+const char *wowtype_sync_status(WowtypeSync *sync);
+
+/* 配对（设置界面用，和 wowtype-sync 命令行是同一套）。结果写在配对文件里，输入法那边的 WowtypeSync
+ * 盯着这个文件，自己跟上。主持、加入都在核心自己的线程里做，界面定时看 wowtype_sync_pairing_state。 */
+typedef struct WowtypeSyncPairConfig {
+    uint32_t size;              /* sizeof(WowtypeSyncPairConfig) */
+    const char *state_file;     /* 配对文件 */
+    const char *device_name;    /* 这台设备叫什么 */
+    int lan;                    /* 在局域网里配 */
+    const char *relay_url;      /* 经中转服务配；NULL/空串不用 */
+    const char *relay_key_file;
+} WowtypeSyncPairConfig;
+
+typedef struct WowtypeSyncPairing WowtypeSyncPairing;
+
+enum {
+    WOWTYPE_SYNC_PAIR_STARTING = 0, /* 还在准备（主持）、正在找另一台（加入） */
+    WOWTYPE_SYNC_PAIR_WAITING = 1,  /* 主持：配对码有了，等另一台输入；_text 是 6 位配对码 */
+    WOWTYPE_SYNC_PAIR_DONE = 2,     /* 配好了；_text 是另一台的名字 */
+    WOWTYPE_SYNC_PAIR_FAILED = 3,   /* 没配上；_text 是给用户看的原因 */
+};
+
+/* 主持：生成配对码，等另一台设备输入（5 分钟内有效）。 */
+WowtypeSyncPairing *wowtype_sync_pair_host(const WowtypeSyncPairConfig *config);
+/* 加入：拿另一台设备上显示的配对码去配。 */
+WowtypeSyncPairing *wowtype_sync_pair_join(const WowtypeSyncPairConfig *config, const char *code);
+int wowtype_sync_pairing_state(WowtypeSyncPairing *pairing);
+/* 见上面各状态。返回的指针到下一次 wowtype_sync_pairing_text 之前有效。 */
+const char *wowtype_sync_pairing_text(WowtypeSyncPairing *pairing);
+/* 还在等的话取消（主持的不再认这个配对码），然后释放。 */
+void wowtype_sync_pairing_free(WowtypeSyncPairing *pairing);
+/* 这台设备取消配对（忘掉组密钥和别的设备；别的设备之间不受影响）。返回 0 成功，-1 失败。 */
+int wowtype_sync_unpair(const char *state_file);
+/* 配对文件里有什么，一行 JSON：{"paired":true,"devices":["名字",…]}（不含密钥）。
+ * 返回的指针在这个线程下一次调 wowtype_sync_paired 之前有效。 */
+const char *wowtype_sync_paired(const char *state_file);
+/* 测试中转服务：地址对不对、口令对不对。要连网，会等到有结果（最多十几秒），放后台线程里调。
+ * 返回 0 能用；-1 不能用，原因在 wowtype_last_error。 */
+int wowtype_sync_ping(const char *relay_url, const char *relay_key_file);
 
 #ifdef __cplusplus
 }

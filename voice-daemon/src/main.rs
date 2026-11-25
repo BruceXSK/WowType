@@ -69,6 +69,7 @@ fn parse_args() -> Options {
                 println!(
                     "wowtype-voiced --hotkey alt_r|ctrl_r --mode tap|hold --silence-ms 1500 [--device 名称] [--asr-cmd '命令 参数']"
                 );
+                println!("  --silence-ms <毫秒>      点按说话时没声音多久自动结束，0 不自动结束（再按一次结束）");
                 println!("  --asr mock|cmd|wtlocal  识别渠道（wtlocal = 微信输入法离线，首次会下载约 100MB）");
                 println!(
                     "  --asr-dir <目录>        离线模型目录，默认 ~/.local/share/wowtype/wtlocal"
@@ -85,7 +86,7 @@ fn parse_args() -> Options {
 pub fn trigger_config(opt: &Options) -> TriggerConfig {
     TriggerConfig {
         hold_threshold: Duration::from_millis(300),
-        silence_timeout: Duration::from_millis(opt.silence_ms),
+        silence_timeout: TriggerConfig::silence_from_ms(opt.silence_ms),
     }
 }
 

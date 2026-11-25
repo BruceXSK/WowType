@@ -8,6 +8,7 @@
 // v + 空格的工具栏和表情面板（Toolbar.swift）。
 // 打字途中按 Control+Delete（Mac 键盘上的 Delete 是退格；有向前删除键或按 Fn+Control+Delete 也行）
 // 忘掉光标处学错的词（ABI 1.7），也是会话管，外壳只在 frame->forgot 时马上存学习数据（onForget）。
+// 候选上点右键（或按着 Control 点）出菜单「忘掉这个词」（ABI 1.18，#229），学过的词才有，点了和 Control+Delete 一样。
 //
 // 互译（「译」，和 Linux 的 fcitx5 外壳一样）：上屏的字不交给应用，攒成原文（translateSource）显示在
 // 候选框顶上；原文停下来 0.5 秒（句末标点立刻）发去翻译，译文边出边写在应用的编辑区里（带下划线）。
@@ -315,6 +316,8 @@ public final class Composer {
     }
     /// 现在画的是哪个结果（signature），结果变了才重画
     private var translateDrawn = ""
+    /// 上一次 apply 以后的模式：离开「译」的 frame 里上屏的照「译」记统计
+    private var appliedMode: Mode = .chinese
     /// 候选框上画着上屏以后的联想：会话关掉了联想、键又交给了应用时要收起来
     private var associationShown = false
     /// 会话的自动配对开着（设置里打开了、这个输入框现在能按位置改字）。变了才重新配会话（关掉时会话丢掉记着的配对）
@@ -361,7 +364,7 @@ public final class Composer {
         if noWayBack || (mode == .translate && !translateAvailable) {
             switchMode(to: .chinese)
         }
-        if !config.clipboardHistory {
+        if !config.clipboardHistory && !config.clipboardSync {
             ClipboardHistory.clear()
         }
         configure()
@@ -644,6 +647,35 @@ public final class Composer {
         apply(frame)
     }
 
+    /// 候选右键菜单里那一项的字样（#229），和 Linux、Windows 的候选框一字不差。
+    public static let forgetMenuTitle = "忘掉这个词"
+
+    /// 候选框里显示的第 index 个（这一页 / 展开面板这一屏里的位置）能不能「忘掉这个词」：是学过的词
+    /// （会话的 wowtype_session_can_forget）。工具栏、表情面板、联想、五笔码、没学过的、自定义词都不能。
+    public func canForget(_ index: Int) -> Bool {
+        guard let at = shownIndex(index) else { return false }
+        return wowtype_session_can_forget(session, at) == 1
+    }
+
+    /// 右键菜单的「忘掉这个词」：忘掉显示的第 index 个，和光标移到它上面按 Control+Delete 一样
+    /// （忘掉了 onForget 马上存，编辑区、页码、光标不动，候选框重画）。
+    public func forget(_ index: Int) {
+        guard let at = shownIndex(index), let frame = wowtype_session_forget(session, at),
+              frame.pointee.handled != 0 else {
+            return
+        }
+        apply(frame)
+    }
+
+    /// 显示的第 index 个在全部候选里的序号；不在打字、开着面板、越界是 nil。
+    private func shownIndex(_ index: Int) -> Int? {
+        guard index >= 0, isComposing, openPanel == nil, let frame = wowtype_session_frame(session),
+              index < frame.pointee.cand_count else {
+            return nil
+        }
+        return frame.pointee.cand_start + index
+    }
+
     /// 候选框上点了翻页箭头、滚了滚轮（和 Linux 的 panelListKey 一样，当成按了 Page Up / Page Down）。
     /// 只在打字途中、工具栏或表情面板开着时翻；上屏以后的联想只有一页，不翻（不然这个键会交给应用）。
     public func turnPage(forward: Bool) {
@@ -676,8 +708,11 @@ public final class Composer {
         }
         config.translate_mode = translateAvailable ? 1 : 0
         config.translate_key = settings.translateModeKey == nil ? 0 : 1
+        // 互译只翻一句（#191）：双击 Shift 进「译」，翻完回去的 frame 可能在 pollTranslation 里，外壳比对模式跟上
+        config.translate_one_shot = settings.translateOneShot ? 1 : 0
         config.toolbar = settings.toolbar ? 1 : 0
-        config.clipboard_history = settings.clipboardHistory ? 1 : 0
+        // 跨设备复制粘贴开着时，别的设备复制过来的也在工具栏的「剪贴板」里
+        config.clipboard_history = (settings.clipboardHistory || settings.clipboardSync) ? 1 : 0
         config.shuangpin_keys = settings.shuangpinShowKeys ? 1 : 0
         config.wubi = settings.wubi ? 1 : 0
         config.wubi_auto_commit = settings.wubiAutoCommit ? 1 : 0
@@ -800,6 +835,9 @@ public final class Composer {
     /// 按会话给的 frame 上屏、更新编辑区和候选框。
     func apply(_ frame: UnsafePointer<WowtypeFrame>?) {
         let delta = frame.map { Int($0.pointee.size) >= MemoryLayout<WowtypeFrame>.size ? Int($0.pointee.cursor_delta) : 0 } ?? 0
+        // 离开「译」的那一下上屏的（只翻一句时的译文，原文原样上屏）照「译」记统计：会话已经切回去了（和 Linux 一样）
+        let statsMode = frame.map { $0.pointee.mode_changed != 0 } == true && appliedMode == .translate ? .translate : mode
+        appliedMode = mode
         var inserted = ""
         if let frame, let commit = frame.pointee.commit {
             // 会话已经补好了空格、记了上文；互译时上屏的是译文、原文
@@ -807,8 +845,8 @@ public final class Composer {
             inserted = text
             client?.insertText(text)
             // 打字统计（外壳按 TypingStats 决定记不记）：互译上屏的不是候选，位置记 0
-            onCommitStats?(text, statsSource, statsScheme,
-                           mode == .translate ? 0 : Int(frame.pointee.choice_index))
+            onCommitStats?(text, statsSource(statsMode), statsScheme(statsMode),
+                           statsMode == .translate ? 0 : Int(frame.pointee.choice_index))
             if frame.pointee.learned != 0 {
                 onCommit?(text)
             }
@@ -832,7 +870,7 @@ public final class Composer {
     }
 
     /// 统计用的输入模式：互译 / 英文 / 五笔 / 双拼 / 全拼。
-    private var statsSource: String {
+    private func statsSource(_ mode: Mode) -> String {
         if mode == .translate { return "translate" }
         if mode == .english { return "english" }
         if config.wubi { return "wubi" }
@@ -840,7 +878,7 @@ public final class Composer {
     }
 
     /// 双拼方案在统计里的名字（小写）；不是双拼时为空。
-    private var statsScheme: String {
+    private func statsScheme(_ mode: Mode) -> String {
         config.shuangpin && mode != .translate && mode != .english ? config.shuangpinScheme.lowercased() : ""
     }
 
@@ -864,7 +902,10 @@ public final class Composer {
             return
         }
         let f = frame.pointee
-        let preedit = String(cString: f.preedit)
+        // InlineSpaceSeparator 开着时输入框里音节之间用空格，不用 '（#247）：网页代码块的语法高亮把 '…' 当字符串，
+        // 打字时一对引号凑齐就重画这一段，浏览器跟丢正在输入的范围，前半截拼音被当成正文留下。空格也是一个字节，光标位置不变
+        let raw = String(cString: f.preedit)
+        let preedit = self.config.inlineSpaceSeparator ? raw.replacingOccurrences(of: "'", with: " ") : raw
         client?.setMarkedText(preedit, cursor: utf16Offset(preedit, byteOffset: Int(f.preedit_cursor)))
         client?.showCandidates(candidatePage(frame))
     }

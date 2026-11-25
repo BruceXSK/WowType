@@ -33,6 +33,10 @@ pub mod stats;
 pub mod stats_ffi;
 pub mod syllable;
 pub mod symbols;
+#[cfg(feature = "sync")]
+pub mod sync_ffi;
+#[cfg(not(feature = "sync"))]
+pub mod sync_stub;
 pub mod train;
 pub mod translate;
 pub mod translate_ffi;
@@ -235,6 +239,8 @@ pub struct Engine {
     new_words: RwLock<HashMap<String, learn::NewWord>>,
     /// 忘掉的词和忘掉的时间（[`Engine::forget_word`]），跟输入习惯一起存，几个进程合并时用，见 [`learn::FORGOTTEN_TTL_MS`]。
     forgotten: RwLock<learn::Forgotten>,
+    /// 用户从候选框里选过、收下的英文原串（`Verah`）：小写键 -> 写法与热度。
+    user_english: RwLock<HashMap<String, learn::EnglishWord>>,
     /// 最近的学习改动（[`Engine::undo_learning`] 用）。
     journal: Mutex<learn::Journal>,
     /// 后台存盘（[`Engine::save_user_dict_async`]）。引擎释放时先写完。
@@ -262,6 +268,7 @@ impl Engine {
             wubi: RwLock::new(None),
             new_words: RwLock::new(HashMap::new()),
             forgotten: RwLock::new(HashMap::new()),
+            user_english: RwLock::new(HashMap::new()),
             journal: Mutex::new(learn::Journal::default()),
             saver: saver::Saver::default(),
         }
@@ -442,6 +449,60 @@ impl Engine {
         self.new_words.read().is_ok_and(|n| n.contains_key(&word))
     }
 
+    /// 从候选框里选了英文原串（`Verah`）：记一次选用，选够
+    /// [`EngineConfig::auto_learn_threshold`] 次就收下，以后打 `verah` 能还原成 `Verah`
+    /// 并排到首选（见 [`Engine::learned_english`]）。
+    ///
+    /// 只认纯 ASCII 字母、长度 2~32 的串。回车上屏的原始字母串不走这里（[`crate::session`]
+    /// 只在上屏时传空拼音），终端里中文模式下打的密码不会因此进 history.tsv。
+    /// 返回这次以后的热度；不是英文原串或关掉了自动学习时是 0。
+    pub fn record_english_selection(&self, word: &str) -> f64 {
+        self.record_english_selection_at(word, now_ms())
+    }
+
+    /// 带时间戳的 [`Engine::record_english_selection`]。
+    pub fn record_english_selection_at(&self, word: &str, at_ms: u64) -> f64 {
+        let Some(key) = learn::english_word_key(word) else {
+            return 0.0;
+        };
+        if !self.config.auto_learn {
+            return 0.0;
+        }
+        let Ok(mut english) = self.user_english.write() else {
+            return 0.0;
+        };
+        let before = english.get(&key).cloned();
+        let entry = learn::bumped(before.as_ref().map(|w| w.entry), at_ms);
+        let heat = entry.count;
+        // 收下以后一直算数：热度衰减到门槛以下也不收回，和用户词库里的词一样
+        let learned = before.as_ref().is_some_and(|w| w.learned)
+            || reached(heat, f64::from(self.config.auto_learn_threshold.max(1)));
+        let after = learn::EnglishWord {
+            text: word.to_string(),
+            entry,
+            learned,
+        };
+        english.insert(key.clone(), after.clone());
+        drop(english);
+        self.journal(vec![learn::Change::EnglishWord {
+            key,
+            before,
+            after: Some(after),
+        }]);
+        heat
+    }
+
+    /// 用户从候选框里选过、已经收下的英文原串的写法（没学过或还没选够是 None）。
+    pub fn learned_english(&self, input: &str) -> Option<String> {
+        let key = learn::english_word_key(input)?;
+        self.user_english
+            .read()
+            .ok()?
+            .get(&key)
+            .filter(|w| w.learned)
+            .map(|w| w.text.clone())
+    }
+
     /// 带时间戳的选词记录（方便测试），返回这次以后的热度。
     ///
     /// 记两样：这个词的热度，和它跟前后词的搭配（见 [`learn`]）。改了什么记进学习日志，
@@ -585,6 +646,18 @@ impl Engine {
                     None => new_words.remove(&word),
                 };
             }
+            learn::Change::EnglishWord { key, before, after } => {
+                let Ok(mut english) = self.user_english.write() else {
+                    return false;
+                };
+                if english.get(&key) != after.as_ref() {
+                    return false;
+                }
+                match before {
+                    Some(word) => english.insert(key, word),
+                    None => english.remove(&key),
+                };
+            }
         }
         true
     }
@@ -629,24 +702,30 @@ impl Engine {
         self.pairs.read().map(|p| p.len()).unwrap_or(0)
     }
 
-    /// 把用户输入习惯（词的热度、词搭配、候选新词）存到 TSV。热度已经衰减得几乎没有的不写。
-    /// 在调用的线程上写完才返回（要等 fsync）；按键的线程上用 [`Engine::save_history_async`]。
+    /// 把用户输入习惯（词的热度、词搭配、候选新词、用户英文原串）存到 TSV。
+    /// 热度已经衰减得几乎没有的不写。在调用的线程上写完才返回（要等 fsync）；
+    /// 按键的线程上用 [`Engine::save_history_async`]。
     pub fn save_history<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
         // 后台还排着、正在写的旧数据先写完，别等这次写好以后再盖上去
         self.saver.flush();
-        let (history, pairs, new_words, forgotten) = self.history_snapshot()?;
-        let text = crate::learn::history_text_with(&history, &pairs, &new_words, &forgotten, now_ms());
+        let (history, pairs, new_words, forgotten, english) = self.history_snapshot()?;
+        let text =
+            crate::learn::history_text_with(&history, &pairs, &new_words, &forgotten, &english, now_ms());
         crate::fsutil::write_atomic(path.as_ref(), text.as_bytes())
     }
 
     /// 在后台存输入习惯：这里只在锁里抄一份，排成文字、写文件（两次 fsync）在存盘的线程上做。
     /// 连着几次还没写的合并成一次。[`Engine::save_wait`] 等写完。
     pub fn save_history_async<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
-        let (history, pairs, new_words, forgotten) = self.history_snapshot()?;
+        let (history, pairs, new_words, forgotten, english) = self.history_snapshot()?;
         let now = now_ms();
         self.saver.submit(
             path.as_ref().to_path_buf(),
-            Box::new(move || Ok(crate::learn::history_text_with(&history, &pairs, &new_words, &forgotten, now))),
+            Box::new(move || {
+                Ok(crate::learn::history_text_with(
+                    &history, &pairs, &new_words, &forgotten, &english, now,
+                ))
+            }),
         );
         Ok(())
     }
@@ -671,7 +750,13 @@ impl Engine {
     #[allow(clippy::type_complexity)]
     fn history_snapshot(
         &self,
-    ) -> Result<(HashMap<String, HistoryEntry>, UserPairs, HashMap<String, learn::NewWord>, learn::Forgotten)> {
+    ) -> Result<(
+        HashMap<String, HistoryEntry>,
+        UserPairs,
+        HashMap<String, learn::NewWord>,
+        learn::Forgotten,
+        HashMap<String, learn::EnglishWord>,
+    )> {
         let history = self
             .history
             .read()
@@ -692,7 +777,12 @@ impl Engine {
             .read()
             .map_err(|_| anyhow::anyhow!("forgotten lock poisoned"))?
             .clone();
-        Ok((history, pairs, new_words, forgotten))
+        let english = self
+            .user_english
+            .read()
+            .map_err(|_| anyhow::anyhow!("english lock poisoned"))?
+            .clone();
+        Ok((history, pairs, new_words, forgotten, english))
     }
 
     /// 读回 [`Engine::save_history`] 存的输入习惯，返回条数。
@@ -713,8 +803,19 @@ impl Engine {
             .forgotten
             .write()
             .map_err(|_| anyhow::anyhow!("forgotten lock poisoned"))?;
-        let n = crate::learn::load_history_with(path, &mut history, &mut pairs, &mut new_words, &mut forgotten)?;
-        drop((history, pairs, new_words, forgotten));
+        let mut english = self
+            .user_english
+            .write()
+            .map_err(|_| anyhow::anyhow!("english lock poisoned"))?;
+        let n = crate::learn::load_history_with(
+            path,
+            &mut history,
+            &mut pairs,
+            &mut new_words,
+            &mut forgotten,
+            &mut english,
+        )?;
+        drop((history, pairs, new_words, forgotten, english));
         // 别的进程忘掉的词：用户词库里的也去掉（用户词库没有时间，按忘掉的记录来）
         self.drop_forgotten_user_words();
         Ok(n)
@@ -1029,6 +1130,11 @@ impl Engine {
         if let Ok(mut new_words) = self.new_words.write() {
             forgot |= new_words.remove(word).is_some();
         }
+        if let Some(key) = learn::english_word_key(word) {
+            if let Ok(mut english) = self.user_english.write() {
+                forgot |= english.remove(&key).is_some();
+            }
+        }
         if let Ok(mut pairs) = self.pairs.write() {
             forgot |= pairs.remove_word(word) > 0;
         }
@@ -1043,6 +1149,24 @@ impl Engine {
             }
         }
         forgot
+    }
+
+    /// [`Engine::forget_word`] 会不会忘掉什么：word 学过（在用户词库里、有选词热度、是攒着的新词、
+    /// 有它在前的搭配、是从候选框里选过的英文原串），又不是设置里加的自定义词。只看不改，候选框的右键菜单据此决定给不给「忘掉这个词」，
+    /// 展开面板一屏 36 个都要问，所以每样只查一次表：它在后的搭配要扫一遍全部搭配，不看（选过它才有这种搭配，
+    /// 那时也记了选词热度）。
+    pub fn can_forget(&self, word: &str) -> bool {
+        let word = self.lexicon_form(word);
+        let word = word.as_str();
+        if word.is_empty() || self.lexicon.is_custom(word) {
+            return false;
+        }
+        self.lexicon.contains(word)
+            || self.history.read().is_ok_and(|h| h.contains_key(word))
+            || self.new_words.read().is_ok_and(|n| n.contains_key(word))
+            || self.pairs.read().is_ok_and(|p| p.has_prev(word))
+            || learn::english_word_key(word)
+                .is_some_and(|key| self.user_english.read().is_ok_and(|e| e.contains_key(&key)))
     }
 
     pub fn user_words(&self) -> Vec<(String, String, f64)> {
@@ -1790,12 +1914,21 @@ impl Engine {
         if !display.bytes().any(|b| b.is_ascii_alphabetic()) {
             return;
         }
-        // 全小写输入且词表里有标准写法时用标准写法（github -> GitHub）
-        let english = self
-            .english
+        // 用户从候选框里选够次数、收下的英文原串（Verah）优先于内置词表
+        let key = display.to_ascii_lowercase();
+        let user_word = self
+            .user_english
             .read()
             .ok()
-            .and_then(|m| m.get(&display.to_ascii_lowercase()).cloned());
+            .and_then(|m| m.get(&key).filter(|w| w.learned).map(|w| w.text.clone()));
+        let learned = user_word.is_some();
+        // 全小写输入且词表里有标准写法时用标准写法（github -> GitHub）
+        let english = user_word.or_else(|| {
+            self.english
+                .read()
+                .ok()
+                .and_then(|m| m.get(&key).cloned())
+        });
         let text = match &english {
             Some(word) if display.bytes().all(|b| !b.is_ascii_uppercase()) => word.clone(),
             _ => display.to_string(),
@@ -1822,9 +1955,15 @@ impl Engine {
         let inner_abbrev = candidates
             .first()
             .is_some_and(|c| is_mixed_jianpin(c) && abbrev_before_last(c));
-        // 打了大写（Hello）却只能凑成混简拼（he l l o -> 合理了哦）：要的是原样上屏
+        // 打了大写（Hello、Verah）却只能凑成混简拼（he l l o -> 合理了哦）、靠纠错
+        // （Verah -> ve'ra'h -> 个大和）或未登录单字：要的是原样上屏。
+        // 有靠纠错才凑出来的词时中文排第二也容易误按空格，所以只要纠了错就算。
         let literal = display.bytes().any(|b| b.is_ascii_uppercase())
-            && candidates.first().is_some_and(is_mixed_jianpin);
+            && candidates.first().is_some_and(|c| {
+                is_mixed_jianpin(c)
+                    || c.features.typo_count > 0.0
+                    || !c.words.iter().any(|w| w.known)
+            });
         let top_typos = candidates
             .first()
             .map(|c| c.features.typo_count)
@@ -1835,7 +1974,15 @@ impl Engine {
             .unwrap_or(false);
         // 第一名是几个词凑的整句（ok -> 哦 | 可）：不是「一个词还没打完」
         let top_sentence = candidates.first().is_some_and(is_sentence);
-        let position = if english.is_some() {
+        let position = if learned {
+            // 用户自己从候选框里选够次数收下的（Verah）：打 verah 就是要它，
+            // 除非本身还是完整的拼音（long、she），中文照旧排前面
+            if exact {
+                Some(5)
+            } else {
+                Some(0)
+            }
+        } else if english.is_some() {
             if exact {
                 // 本身就是拼音的英文词（fan、long、she）：前 5 个留给中文
                 Some(5)
@@ -4281,6 +4428,24 @@ mod tests {
         assert_eq!(e.history_count("妮好"), 1);
     }
 
+    /// can_forget 和 forget_word 说的一致：学过的才是 true，只看不改（右键菜单用，#229）。
+    #[test]
+    fn can_forget_matches_forget_word() {
+        let e = engine("ni hao\t你好\t10\n");
+        assert!(!e.can_forget("你好"), "词库里本来就有、没学过");
+        assert!(!e.can_forget(""));
+        e.add_user_word("wo wo te", "我特", 5000.0).unwrap();
+        assert!(e.can_forget("我特"), "用户词库里的");
+        assert!(e.can_forget("我特"), "问一次不改什么");
+        e.record_selection("你好");
+        assert!(e.can_forget("你好"), "有选词热度");
+        assert!(e.forget_word("我特") && e.forget_word("你好"));
+        assert!(!e.can_forget("我特") && !e.can_forget("你好"));
+        e.lexicon().set_custom_tsv("ni hao\t妮好\n");
+        e.record_selection("妮好");
+        assert!(!e.can_forget("妮好"), "自定义词不忘");
+    }
+
     #[test]
     fn async_save_writes_in_background() {
         let e = engine("ni hao\t你好\t10\n");
@@ -4997,6 +5162,97 @@ mod tests {
         assert!(pos == 5 || (pos >= 1 && pos == she.len() - 1), "{she:?}");
         // 缩写编码（Jan -> January）不当作英文词
         assert!(!texts("jan").iter().any(|t| t == "January"));
+    }
+
+    #[test]
+    fn explicit_uppercase_unknown_word_comes_first() {
+        // Verah 不是词表里的词：ve'ra'h 只能靠两处纠错凑成「个大和」。打了大写就是想要原样上屏
+        let e = engine("ge\t个\t1000\nda\t大\t1000\nhe\t和\t1000\n");
+        let texts =
+            |input: &str| -> Vec<String> { e.input(input).into_iter().map(|c| c.text).collect() };
+        assert_eq!(texts("Verah")[0], "Verah", "{:?}", texts("Verah"));
+        // 没打大写时按原来的规则（纠了两处错的中文排第一）
+        assert_eq!(texts("verah")[0], "个大和", "{:?}", texts("verah"));
+        // 完整的拼音词不受影响（Nihao 还是要「你好」）
+        let pinyin = engine("ni hao\t你好\t100000\n");
+        let pinyin_texts =
+            |input: &str| -> Vec<String> { pinyin.input(input).into_iter().map(|c| c.text).collect() };
+        assert_eq!(
+            pinyin_texts("Nihao")[0],
+            "你好",
+            "{:?}",
+            pinyin_texts("Nihao")
+        );
+    }
+
+    #[test]
+    fn selected_english_original_is_learned_after_threshold() {
+        let e = engine("ge\t个\t1000\nda\t大\t1000\nhe\t和\t1000\n");
+        let texts =
+            |input: &str| -> Vec<String> { e.input(input).into_iter().map(|c| c.text).collect() };
+        for _ in 0..2 {
+            e.record_english_selection_at("Verah", 1_000_000);
+        }
+        assert_eq!(e.learned_english("verah"), None, "没选够次数先不收");
+        assert_eq!(texts("verah")[0], "个大和");
+
+        e.record_english_selection_at("Verah", 1_000_000);
+        assert_eq!(e.learned_english("verah").as_deref(), Some("Verah"));
+        // 小写输入还原成学到的写法并排第一，纠错凑出来的中文不再出现
+        assert_eq!(texts("verah"), ["Verah"], "{:?}", texts("verah"));
+        assert_eq!(texts("Verah")[0], "Verah");
+
+        // 右键菜单据此给「忘掉这个词」：选过的英文原串能忘，没选过的不给
+        assert!(e.can_forget("Verah") && !e.can_forget("Zoey"));
+        // 忘掉以后回到没学过的样子
+        assert!(e.forget_word("Verah"));
+        assert!(!e.can_forget("Verah"));
+        assert_eq!(e.learned_english("verah"), None);
+        assert_eq!(texts("verah")[0], "个大和");
+    }
+
+    #[test]
+    fn english_merge_keeps_the_newer_selection() {
+        // Windows 上每个应用进程各有一个引擎，存盘前会把别的进程的 history.tsv 读进来合并
+        let dir = std::env::temp_dir().join(format!("wowtype-english-merge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.tsv");
+        let now = now_ms();
+
+        // 文件里的更晚、收下了：合并进来
+        let old = engine("ge\t个\t1000\n");
+        old.record_english_selection_at("Verah", now - 120_000);
+        let newer = engine("ge\t个\t1000\n");
+        for _ in 0..3 {
+            newer.record_english_selection_at("Verah", now);
+        }
+        newer.save_history(&path).unwrap();
+        old.load_history(&path).unwrap();
+        assert_eq!(old.learned_english("verah").as_deref(), Some("Verah"));
+        std::fs::remove_file(&path).unwrap();
+
+        // 内存里的更晚（还没选够）：不被文件里旧的收下状态盖回去
+        let stale = engine("ge\t个\t1000\n");
+        for _ in 0..3 {
+            stale.record_english_selection_at("Verah", now - 120_000);
+        }
+        stale.save_history(&path).unwrap();
+        let fresh = engine("ge\t个\t1000\n");
+        fresh.record_english_selection_at("Verah", now);
+        fresh.load_history(&path).unwrap();
+        assert_eq!(fresh.learned_english("verah"), None, "内存里更晚的算数");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enter_style_raw_letters_are_not_learned() {
+        // 没有从候选框里选（回车上屏）时不经 record_english_selection：
+        // 这里验证引擎只认显式调用，原始串长度/字符不合适也不收
+        let e = default_engine();
+        assert_eq!(e.record_english_selection_at("a", 1), 0.0);
+        assert_eq!(e.record_english_selection_at("密码1", 1), 0.0);
+        assert_eq!(e.record_english_selection_at("hunter2", 1), 0.0);
+        assert_eq!(e.learned_english("hunter2"), None);
     }
 
     #[test]

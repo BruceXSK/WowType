@@ -221,6 +221,8 @@ public struct WowtypeConfig: Equatable {
     public var fuzzyEngOng = false
     public var typoCorrection = true
     public var rareExtChars = false
+    /// 输入框里的拼音用空格分音节（ni hao），不用 '；网页代码块里留下半截拼音时打开（#247）
+    public var inlineSpaceSeparator = false
     public var inputScheme = InputScheme.quanpin
     public var shuangpinScheme = "Ziranma"
     /// 双拼时编辑区显示打的键（uivs），不翻成全拼（#122）
@@ -254,10 +256,23 @@ public struct WowtypeConfig: Equatable {
     public var toolbar = true
     /// 记录剪贴板历史（只在内存里，最多 20 条）。默认关：可能把复制的密码也记下来
     public var clipboardHistory = false
+    /// 跨设备复制粘贴（docs/SYNC.md）：一台设备上复制的文字，在配过对的另一台上直接粘贴。默认关；
+    /// 配对在设置窗口里做，组密钥在数据目录的 sync.json，中转服务的访问口令在 sync-relay.key
+    public var clipboardSync = false
+    /// 同一个局域网里直接传
+    public var clipboardSyncLan = true
+    /// 自己部署的中转服务地址，留空不用
+    public var clipboardSyncRelayUrl = ""
+    /// 这台设备的名字，留空用电脑的名字
+    public var clipboardSyncDeviceName = ""
+    /// 收到的也放进系统剪贴板（能直接 Command+V）
+    public var clipboardSyncPaste = true
     /// 语音输入：按住 voiceKey 说话，松开出字（模型在设置窗口里下载）
     public var voice = true
     /// 语音键，fcitx5 键名：Alt_R（右 Option）、Control_R、F8…；留空不用
     public var voiceKey = "Alt_R"
+    /// 点按说话时没声音多久自动结束，毫秒，0–60000；0 不自动结束（再点一下语音键结束，最长录 2 分钟）。#285
+    public var voiceSilenceTimeout = 1500
     /// 语音识别的结果同时复制到剪贴板
     public var voiceCopy = false
     /// 打开表情面板的快捷键，nil 不用快捷键。Linux 默认 Super+period；macOS 上 Command 组合键
@@ -288,9 +303,11 @@ public struct WowtypeConfig: Equatable {
     public var translateModel = ""
     /// 译文用正式语气（默认聊天口吻）
     public var translateFormal = false
+    /// 双击 Shift 单次互译（#191）：单按 Shift 只切中英，双击 Shift（或按互译键）进「译」翻一句就回来
+    public var translateOneShot = false
     /// 用本地模型（HY-MT），默认是。配置文件里没写这一项、又填了 TranslateBaseUrl 时是 False（见 parse，三端一样）
     public var translateLocal = true
-    /// 本地模型文件，留空用数据目录下 models/HY-MT1.5-1.8B-Q4_K_M.gguf
+    /// 本地模型文件，留空用数据目录下 models/Hy-MT3-1.8B-Q4_K_M.gguf
     public var translateLocalModel = ""
     /// llama-server 的路径，留空自己找
     public var translateLlamaServer = ""
@@ -408,14 +425,17 @@ public struct WowtypeConfig: Equatable {
         "Fuzzy", "FuzzyZh", "FuzzyCh", "FuzzySh", "FuzzyNL", "FuzzyFH", "FuzzyRL",
         "FuzzyAn", "FuzzyEn", "FuzzyIn", "FuzzyIan", "FuzzyUan", "FuzzyUn",
         "FuzzyAnAi", "FuzzyHuangWang", "FuzzyUnIong", "FuzzyEngOng",
-        "TypoCorrection", "RareExtChars", "InputScheme", "ShuangpinScheme", "ShuangpinShowKeys",
+        "TypoCorrection", "RareExtChars", "InlineSpaceSeparator", "InputScheme", "ShuangpinScheme", "ShuangpinShowKeys",
         "ShuangpinAbbrev", "WubiAutoCommit", "WubiHint", "ShiftToggle", "InitialMode", "WindowMode",
         "Traditional",
         "PunctuationStyle", "AutoPairPunct", "DateTime", "Calculator", "EmojiSuggest", "AutoSpace", "AutoSpaceLetters",
-        "AutoSpaceDigits", "Lexicon", "Toolbar", "ClipboardHistory", "Voice", "VoiceKey", "VoiceCopy", "EmojiKey",
+        "AutoSpaceDigits", "Lexicon", "Toolbar", "ClipboardHistory",
+        "ClipboardSync", "ClipboardSyncLan", "ClipboardSyncRelayUrl", "ClipboardSyncDeviceName", "ClipboardSyncPaste",
+        "Voice", "VoiceKey", "VoiceSilenceTimeout",
+        "VoiceCopy", "EmojiKey",
         "ToggleKey", "TranslateModeKey", "CheckUpdate", "BetaUpdates", "TypingStats", "SettingsTheme", "SettingsAccent",
-        "Translate", "TranslateTarget", "TranslateBaseUrl", "TranslateModel", "TranslateFormal", "TranslateLocal",
-        "TranslateLocalModel", "TranslateLlamaServer", "TranslateIdleMinutes",
+        "Translate", "TranslateTarget", "TranslateBaseUrl", "TranslateModel", "TranslateFormal", "TranslateOneShot",
+        "TranslateLocal", "TranslateLocalModel", "TranslateLlamaServer", "TranslateIdleMinutes",
     ]
 
     /// 开关类的键（True / False）
@@ -428,12 +448,16 @@ public struct WowtypeConfig: Equatable {
         "FuzzyUn": \.fuzzyUn, "FuzzyAnAi": \.fuzzyAnAi, "FuzzyHuangWang": \.fuzzyHuangWang,
         "FuzzyUnIong": \.fuzzyUnIong, "FuzzyEngOng": \.fuzzyEngOng,
         "TypoCorrection": \.typoCorrection, "RareExtChars": \.rareExtChars,
+        "InlineSpaceSeparator": \.inlineSpaceSeparator,
         "ShuangpinShowKeys": \.shuangpinShowKeys, "ShuangpinAbbrev": \.shuangpinAbbrev, "WubiAutoCommit": \.wubiAutoCommit, "WubiHint": \.wubiHint,
         "Traditional": \.traditional, "AutoPairPunct": \.autoPairPunct, "PickChar": \.pickChar, "Association": \.association,
         "DateTime": \.dateTime, "Calculator": \.calculator, "EmojiSuggest": \.emojiSuggest,
         "AutoSpace": \.autoSpace, "AutoSpaceLetters": \.autoSpaceLetters, "AutoSpaceDigits": \.autoSpaceDigits,
         "Toolbar": \.toolbar, "ClipboardHistory": \.clipboardHistory, "Voice": \.voice, "VoiceCopy": \.voiceCopy,
-        "Translate": \.translate, "TranslateFormal": \.translateFormal, "TranslateLocal": \.translateLocal,
+        "ClipboardSync": \.clipboardSync, "ClipboardSyncLan": \.clipboardSyncLan,
+        "ClipboardSyncPaste": \.clipboardSyncPaste,
+        "Translate": \.translate, "TranslateFormal": \.translateFormal, "TranslateOneShot": \.translateOneShot,
+        "TranslateLocal": \.translateLocal,
         "CheckUpdate": \.checkUpdate, "BetaUpdates": \.betaUpdates, "TypingStats": \.typingStats,
     ]
 
@@ -468,6 +492,8 @@ public struct WowtypeConfig: Equatable {
         case "CandidateFontSize":
             if let n = Int(value) { candidateFontSize = min(max(n, 10), 40) }
         case "VoiceKey": voiceKey = value
+        case "VoiceSilenceTimeout":
+            if let n = Int(value) { voiceSilenceTimeout = min(max(n, 0), 60000) }
         case "EmojiKey":
             // 留空是不用快捷键；写错了保持默认
             if value.isEmpty {
@@ -490,6 +516,8 @@ public struct WowtypeConfig: Equatable {
         case "TranslateTarget":
             if let v = matchName(value, WowtypeConfig.translateTargets) { translateTarget = v }
         case "TranslateBaseUrl": translateBaseUrl = value
+        case "ClipboardSyncRelayUrl": clipboardSyncRelayUrl = value
+        case "ClipboardSyncDeviceName": clipboardSyncDeviceName = value
         case "TranslateModel": translateModel = value
         case "TranslateLocalModel": translateLocalModel = value
         case "TranslateLlamaServer": translateLlamaServer = value
@@ -519,6 +547,7 @@ public struct WowtypeConfig: Equatable {
         case "Lexicon": return lexicon
         case "CandidateFontSize": return String(candidateFontSize)
         case "VoiceKey": return voiceKey
+        case "VoiceSilenceTimeout": return String(voiceSilenceTimeout)
         case "EmojiKey": return emojiKey?.name ?? ""
         case "ToggleKey": return toggleKey?.name ?? ""
         case "TranslateModeKey": return translateModeKey?.name ?? ""
@@ -526,6 +555,8 @@ public struct WowtypeConfig: Equatable {
         case "SettingsAccent": return settingsAccent
         case "TranslateTarget": return translateTarget
         case "TranslateBaseUrl": return translateBaseUrl
+        case "ClipboardSyncRelayUrl": return clipboardSyncRelayUrl
+        case "ClipboardSyncDeviceName": return clipboardSyncDeviceName
         case "TranslateModel": return translateModel
         case "TranslateLocalModel": return translateLocalModel
         case "TranslateLlamaServer": return translateLlamaServer
@@ -713,6 +744,8 @@ public struct WowtypeConfig: Equatable {
         TypoCorrection=\(b(d.typoCorrection))
         # 候选末尾也列出扩展 B 区以后的生僻字（常见字体显示不了，默认关）
         RareExtChars=\(b(d.rareExtChars))
+        # 输入框里的拼音用空格分音节（ni hao），不用 '；网页代码块里留下半截拼音时打开
+        InlineSpaceSeparator=\(b(d.inlineSpaceSeparator))
 
         # 输入方案：Quanpin 全拼、Shuangpin 双拼、Wubi86 五笔 86
         InputScheme=\(d.inputScheme.rawValue)
@@ -758,11 +791,22 @@ public struct WowtypeConfig: Equatable {
         Toolbar=\(b(d.toolbar))
         # 工具栏里记剪贴板历史（只在内存里，最多 20 条）。可能把复制的密码也记下来，默认关
         ClipboardHistory=\(b(d.clipboardHistory))
+        # 跨设备复制粘贴：一台设备上复制的文字，在配过对的另一台上直接粘贴（配对在设置窗口「输入」页做）。
+        # 内容端到端加密；同一个局域网里直接传，不在一个局域网时走自己部署的中转服务（留空不用）
+        ClipboardSync=\(b(d.clipboardSync))
+        ClipboardSyncLan=\(b(d.clipboardSyncLan))
+        ClipboardSyncRelayUrl=
+        ClipboardSyncDeviceName=
+        # 收到的也放进系统剪贴板（能直接 Command+V）；关掉只出现在 v + 空格的「剪贴板」里
+        ClipboardSyncPaste=\(b(d.clipboardSyncPaste))
 
         # 语音输入：按住语音键说话，松开出字（点按一下也行，说完停一下自动结束）。模型在设置窗口「语音」页下载
         Voice=\(b(d.voice))
         # 语音键：Alt_R 右 Option、Control_R 右 Control、F8、F9、F10；留空不用
         VoiceKey=\(d.voiceKey)
+        # 点按说话时没声音多久自动结束，毫秒：1500（1.5 秒）、3000、5000、10000、30000；
+        # 0 不自动结束，再点一下语音键结束（一次最长录 2 分钟）。长按说话松开就结束，不看这一项
+        VoiceSilenceTimeout=\(d.voiceSilenceTimeout)
         # 说的话上屏的同时复制到剪贴板
         VoiceCopy=\(b(d.voiceCopy))
         # 打开表情面板的快捷键，键名同 fcitx5：Control+period、Control+semicolon、Control+Shift+E；留空不用。
@@ -798,12 +842,15 @@ public struct WowtypeConfig: Equatable {
         TranslateModel=
         # 译文用正式语气（默认聊天口吻）
         TranslateFormal=\(b(d.translateFormal))
-        # 用本地模型（腾讯 HY-MT 1.5 1.8B，离线）翻译，默认 True；False 用上面的服务。
+        # 双击 Shift 单次互译：打开后单按 Shift 只在中英之间切，0.35 秒内连按两下 Shift（或按互译键）
+        # 进「译」只翻一句，译文上屏（或 Esc、单按 Shift 放弃）后回到原来的模式。关着时双击 Shift 不切换
+        TranslateOneShot=\(b(d.translateOneShot))
+        # 用本地模型（腾讯混元 Hy-MT3 1.8B，离线）翻译，默认 True；False 用上面的服务。
         # 删掉这一行时：上面填了 TranslateBaseUrl 就当 False（以前的设置照旧用服务），没填就是 True。
         # 模型和运行它的 llama-server 在设置窗口「翻译」页一键下载，放在数据目录的 models/ 和 llama/
         # （模型不是开源许可，不适用于欧盟、英国和韩国，见 docs/CONFIG.md）
         TranslateLocal=\(b(d.translateLocal))
-        # 模型文件的位置，留空用 models/HY-MT1.5-1.8B-Q4_K_M.gguf
+        # 模型文件的位置，留空用 models/Hy-MT3-1.8B-Q4_K_M.gguf
         TranslateLocalModel=
         # llama-server 的位置，留空先用设置里下载的，再在 /opt/homebrew/bin、/usr/local/bin 等处找
         TranslateLlamaServer=

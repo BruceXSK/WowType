@@ -32,6 +32,18 @@ struct SettingDef {
 /// Windows 认的全部设置项，顺序同 spec/config.json。
 const std::vector<SettingDef> &settingDefs();
 
+/// 「停顿多久自动结束」（VoiceSilenceTimeout，毫秒，#285）：设置窗口语音页的下拉框。名字、选项、说明和
+/// Linux、macOS 的设置一样（spec/config.json 的 title、info、choices，契约测试拿 config_dump --voice 对照）。
+struct IntChoice {
+    int value;
+    const char *name;
+};
+inline constexpr char kVoiceSilenceTitle[] = "停顿多久自动结束";
+inline constexpr char kVoiceSilenceInfo[] =
+    "点按说话时没声音多久就自动结束；选「不自动结束」时再点一下语音键结束。"
+    "一次最长录 2 分钟，到了也会结束。长按说话松开就结束，不受这一项影响。";
+const std::vector<IntChoice> &voiceSilenceChoices();
+
 class Config {
 public:
     Config();

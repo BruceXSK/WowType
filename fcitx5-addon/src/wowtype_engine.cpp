@@ -20,10 +20,15 @@
 #include <thread>
 #include <utility>
 
+#include <unistd.h>
+
 #include <fcitx-config/iniparser.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/candidatelist.h>
+#ifdef WOWTYPE_HAVE_CANDIDATE_ACTIONS
+#include <fcitx/candidateaction.h>
+#endif
 #include <fcitx/globalconfig.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputcontextmanager.h>
@@ -180,6 +185,14 @@ void setClientPreedit(fcitx::InputPanel &panel, const fcitx::Text &text) {
     panel.setClientPreedit(shown);
 }
 
+/// 写进输入框的拼音：音节之间的 ' 换成空格（InlineSpaceSeparator 开着时，#247）。网页里的代码块会给 '…'
+/// 上语法高亮，打字时一对引号刚凑齐（ni'zai'g）编辑器就重画这一段，浏览器跟丢了正在输入的范围，前半截拼音
+/// 被当成正文留下。空格和 ' 一样是一个字节，会话给的光标位置不用改；候选框里的编辑区照旧用 '。
+std::string inlineSyllables(std::string text) {
+    std::replace(text.begin(), text.end(), '\'', ' ');
+    return text;
+}
+
 std::string userConfigDir() {
     if (const char *config = std::getenv("XDG_CONFIG_HOME"); config && *config) {
         return std::string(config) + "/wowtype";
@@ -204,6 +217,27 @@ constexpr uint32_t kOverlayRecognizing = 2;
 constexpr uint32_t kOverlayDone = 3;
 constexpr uint32_t kOverlayError = 4;
 constexpr uint64_t kOverlayAckUsec = 800 * 1000;
+
+// 展开面板的网格（#270）：GNOME 下 kimpanel 只会把整行涂绿，看不出光标在哪个词上。
+// WowType 的扩展登记 kGridService，插件把这一屏的格子发给它画真正的 6×6 网格，只有光标处那一格高亮：
+//   插件 -> 扩展  Show(u serial, as 格子, u 第一格的全局下标, u 光标的全局下标, u 列数, u 第几屏, u 共几屏,
+//                      s 提示, i x, i y, i w, i h, b 相对窗口, d 缩放,
+//                      ay 每格能不能「忘掉这个词」，1 能（#229，加在末尾，旧扩展不看）)
+//                 Hide(u serial)
+//   扩展 -> 插件  Ack(u serial)            画好了、显示出来了
+//                 Select(u serial, u 下标)  点了一格（全局下标）
+//                 Forget(u serial, u 下标)  右键点了一格、选了「忘掉这个词」（#229）
+//                 Page(u serial, i 方向)    点了翻页按钮（-1 上一页，+1 下一页）
+// 光标矩形和语音浮条、kimpanel 的一样。扩展回执期间 kimpanel 拿到的是一个空列表（提示、编辑区也挪进网格），
+// 它的候选框整个不画；扩展没登记这个名字（没装、停用了、只会画语音浮条的旧版）就照旧把网格拼成几行给 kimpanel，
+// 发了 kGridAckUsec 还没有回执也退回去。
+constexpr const char *kGridService = "io.github.gloridust.WowType.CandidateGrid";
+constexpr const char *kGridInterface = "io.github.gloridust.WowType.Grid1";
+constexpr uint64_t kGridAckUsec = 500 * 1000;
+
+// 候选右键菜单里忘掉学过的词（#229）。字样三个平台一字不差（macOS、Windows 的候选框，GNOME 扩展的网格）。
+constexpr const char *kForgetActionText = "忘掉这个词";
+constexpr int kForgetActionId = 1;
 
 /// 用户输入习惯（词的热度、词搭配）和用户词库放在同一个目录：history.tsv。
 std::string historyPathFor(const std::string &userDict) {
@@ -473,6 +507,9 @@ public:
         engine_->commitCandidate(inputContext, state_, index_);
     }
 
+    /// 在外壳抄的候选（WowtypeState::candidates_）里的下标。
+    std::size_t index() const { return index_; }
+
 private:
     WowtypeEngine *engine_;
     WowtypeState *state_;
@@ -677,11 +714,70 @@ public:
 
 namespace {
 
+#ifdef WOWTYPE_HAVE_CANDIDATE_ACTIONS
+/// 候选上点右键出的菜单（fcitx5 5.1.10 起的 ActionableCandidateList，经典界面画；kimpanel 不画）：
+/// 学过的词给一项「忘掉这个词」（#229），和光标移到它上面按 Ctrl+Delete 一样。
+class WowtypeForgetActions final : public fcitx::ActionableCandidateList {
+public:
+    WowtypeForgetActions(WowtypeEngine *engine, fcitx::InputContext *ic, WowtypeState *state,
+                         const fcitx::CandidateList *owner)
+        : engine_(engine), ic_(ic->watch()), state_(state), owner_(owner) {}
+
+    bool hasAction(const fcitx::CandidateWord &candidate) const override {
+        const auto *word = dynamic_cast<const WowtypeCandidateWord *>(&candidate);
+        return word && ic_.get() && engine_->canForgetCandidate(state_, word->index());
+    }
+
+    std::vector<fcitx::CandidateAction>
+    candidateActions(const fcitx::CandidateWord &candidate) const override {
+        std::vector<fcitx::CandidateAction> actions;
+        if (hasAction(candidate)) {
+            fcitx::CandidateAction forget;
+            forget.setId(kForgetActionId);
+            forget.setText(kForgetActionText);
+            actions.push_back(std::move(forget));
+        }
+        return actions;
+    }
+
+    void triggerAction(const fcitx::CandidateWord &candidate, int id) override {
+        const auto *word = dynamic_cast<const WowtypeCandidateWord *>(&candidate);
+        auto *ic = ic_.get();
+        if (id != kForgetActionId || !word || !ic) {
+            return;
+        }
+        // 只认输入框现在显示的这个列表（菜单开着时候选框换了的不算）。忘掉以后重画会换掉它，
+        // 连同这个对象和 candidate 一起释放：忘完之前先留着
+        const auto keep = ic->inputPanel().candidateList();
+        if (keep.get() != owner_) {
+            return;
+        }
+        const std::size_t index = word->index();
+        engine_->forgetCandidate(ic, state_, index);
+    }
+
+private:
+    WowtypeEngine *engine_;
+    fcitx::TrackableObjectReference<fcitx::InputContext> ic_;
+    WowtypeState *state_;
+    const fcitx::CandidateList *owner_;
+};
+#endif
+
 /// 普通候选的列表：翻页、移动光标交给会话，再照会话的页码和光标摆好自己。
 /// 键盘上的翻页键由会话直接处理；这里接的是鼠标点翻页按钮、滚轮，和直接调候选列表的。
+/// 右键点候选：学过的词给「忘掉这个词」（fcitx5 5.1.10 起）。
 class WowtypeSessionList final : public fcitx::CommonCandidateList {
 public:
-    explicit WowtypeSessionList(WowtypeState *state) : state_(state) {}
+    WowtypeSessionList(WowtypeEngine *engine, fcitx::InputContext *ic, WowtypeState *state)
+        : state_(state) {
+#ifdef WOWTYPE_HAVE_CANDIDATE_ACTIONS
+        setActionableImpl(std::make_unique<WowtypeForgetActions>(engine, ic, state, this));
+#else
+        (void)engine;
+        (void)ic;
+#endif
+    }
 
     void prev() override { act(WOWTYPE_KEY_ACTION_PREV_PAGE); }
     void next() override { act(WOWTYPE_KEY_ACTION_NEXT_PAGE); }
@@ -735,6 +831,10 @@ private:
     WowtypeState *state_;
     bool mirroring_ = false;
 };
+
+/// 展开面板交给 GNOME 扩展画网格时给 kimpanel 的列表（#270）：一项也没有，kimpanel 就不画候选框。
+/// 也是个记号：输入框上换成了别的列表，就是不再显示网格了，叫扩展收起。
+class WowtypeGridOverlayList final : public fcitx::CommonCandidateList {};
 
 /// 工具栏、表情面板、展开面板的列表：候选框上的翻页按钮、滚轮和直接调列表的，都和键盘上按
 /// Page Up / Page Down、上下键一样交给会话，再照会话的光标整个重画（WowtypeEngine::panelListKey）。
@@ -818,7 +918,7 @@ WowtypeEngine::WowtypeEngine(fcitx::Instance *instance)
         }
     }
     applyConfig();
-    setupVoiceOverlay();
+    setupOverlays();
     setupControl();
 }
 
@@ -894,9 +994,12 @@ bool WowtypeEngine::setModeByName(const std::string &mode) {
     return true;
 }
 
-void WowtypeEngine::setupVoiceOverlay() {
-    // WOWTYPE_VOICE_OVERLAY=0：不用 GNOME 扩展的浮条，一直用候选框里的文字提示
-    if (!envFlag("WOWTYPE_VOICE_OVERLAY", true)) {
+void WowtypeEngine::setupOverlays() {
+    // WOWTYPE_VOICE_OVERLAY=0：不用 GNOME 扩展的浮条，一直用候选框里的文字提示；
+    // WOWTYPE_GRID_OVERLAY=0：展开面板一直拼成几行交给 kimpanel
+    const bool voice = envFlag("WOWTYPE_VOICE_OVERLAY", true);
+    const bool grid = envFlag("WOWTYPE_GRID_OVERLAY", true);
+    if (!voice && !grid) {
         return;
     }
     try {
@@ -907,6 +1010,12 @@ void WowtypeEngine::setupVoiceOverlay() {
         bus->attachEventLoop(&instance_->eventLoop());
         overlayBus_ = std::move(bus);
         overlayWatcher_ = std::make_unique<fcitx::dbus::ServiceWatcher>(*overlayBus_);
+        if (grid) {
+            setupGridOverlay();
+        }
+        if (!voice) {
+            return;
+        }
         overlayWatch_ = overlayWatcher_->watchService(
             kOverlayService,
             [this](const std::string &, const std::string &, const std::string &owner) {
@@ -934,6 +1043,13 @@ void WowtypeEngine::setupVoiceOverlay() {
     } catch (const std::exception &e) {
         // 没有会话总线（比如测试里）：用文字提示
         WLOG_I() << "WowType: 连不上会话总线，语音用文字提示：" << e.what();
+        gridEventWatchers_.clear();
+        gridSelectSlot_.reset();
+        gridForgetSlot_.reset();
+        gridPageSlot_.reset();
+        gridAckSlot_.reset();
+        gridWatch_.reset();
+        gridOwner_.clear();
         overlayAckSlot_.reset();
         overlayWatch_.reset();
         overlayWatcher_.reset();
@@ -941,27 +1057,39 @@ void WowtypeEngine::setupVoiceOverlay() {
     }
 }
 
+namespace {
+/// 光标矩形，和 kimpanel 的 SetSpotRect / SetRelativeSpotRectV2 同一个意思（扩展照 kimpanel 的算法换成屏幕坐标）。
+struct OverlayCursor {
+    int32_t x = 0, y = 0, w = 0, h = 0;
+    bool relative = false;
+    double scale = 1.0;
+};
+
+OverlayCursor overlayCursor(fcitx::InputContext *ic) {
+    OverlayCursor out;
+    if (ic) {
+        const fcitx::Rect &rect = ic->cursorRect();
+        out.x = rect.left();
+        out.y = rect.top();
+        out.w = rect.width();
+        out.h = rect.height();
+        out.relative = ic->capabilityFlags().test(fcitx::CapabilityFlag::RelativeRect);
+        out.scale = ic->scaleFactor();
+    }
+    return out;
+}
+} // namespace
+
 void WowtypeEngine::sendVoiceOverlay(fcitx::InputContext *ic, uint32_t state,
                                      const std::string &label, int level) {
     if (!overlayBus_ || overlayOwner_.empty()) {
         return;
     }
-    int32_t x = 0, y = 0, w = 0, h = 0;
-    bool relative = false;
-    double scale = 1.0;
-    if (ic) {
-        const fcitx::Rect &rect = ic->cursorRect();
-        x = rect.left();
-        y = rect.top();
-        w = rect.width();
-        h = rect.height();
-        relative = ic->capabilityFlags().test(fcitx::CapabilityFlag::RelativeRect);
-        scale = ic->scaleFactor();
-    }
+    const OverlayCursor c = overlayCursor(ic);
     auto msg = overlayBus_->createSignal(kOverlayPath, kOverlayInterface, "State");
     msg.setDestination(overlayOwner_);
-    msg << state << label << static_cast<int32_t>(std::clamp(level, 0, 100)) << x << y << w << h
-        << relative << scale;
+    msg << state << label << static_cast<int32_t>(std::clamp(level, 0, 100)) << c.x << c.y << c.w
+        << c.h << c.relative << c.scale;
     msg.send();
     if (state != kOverlayHide && state != kOverlayDone && !overlaySentAt_) {
         overlaySentAt_ = fcitx::now(CLOCK_MONOTONIC);
@@ -980,6 +1108,201 @@ void WowtypeEngine::checkOverlayAck(fcitx::InputContext *ic) {
     if (voiceErrorUntil_ && !voiceErrorText_.empty()) {
         showVoice(ic, "🎙 " + voiceErrorText_, {});
     }
+}
+
+void WowtypeEngine::setupGridOverlay() {
+    gridWatch_ = overlayWatcher_->watchService(
+        kGridService, [this](const std::string &, const std::string &, const std::string &owner) {
+            if (owner == gridOwner_) {
+                return;
+            }
+            gridOwner_ = owner;
+            // 换了一个扩展实例（重新登录、扩展重载）：再给网格一次机会
+            gridBroken_ = false;
+            gridAckedSerial_ = gridSerial_;
+            gridPendingSince_ = 0;
+            WLOG_I() << "WowType: 展开面板的网格" << (owner.empty() ? "不在了，用 kimpanel 的列表" : "就绪");
+            // 正显示着网格时扩展没了（停用、重载）：马上照现在的样子重画，换回 kimpanel 的列表
+            if (auto *ic = gridIc_.get()) {
+                gridIc_.unwatch();
+                updateInputPanel(ic, ic->propertyFor(&factory_));
+            }
+        });
+    gridAckSlot_ = overlayBus_->addMatch(
+        fcitx::dbus::MatchRule(kGridService, kOverlayPath, kGridInterface, "Ack"),
+        [this](fcitx::dbus::Message &msg) {
+            uint32_t serial = 0;
+            msg >> serial;
+            if (msg.sender() != gridOwner_ || serial == 0 || serial > gridSerial_) {
+                return true;
+            }
+            if (gridBroken_) {
+                // 回执迟到了（扩展只是慢）：下一次展开照样交给它
+                gridBroken_ = false;
+                WLOG_I() << "WowType: 展开面板的网格回执迟到了，下次照样由扩展画";
+            }
+            gridAckedSerial_ = std::max(gridAckedSerial_, serial);
+            // 后面发的还没回执：从现在起再等一轮
+            gridPendingSince_ = gridAckedSerial_ >= gridSerial_ ? 0 : fcitx::now(CLOCK_MONOTONIC);
+            return true;
+        });
+    gridSelectSlot_ = overlayBus_->addMatch(
+        fcitx::dbus::MatchRule(kGridService, kOverlayPath, kGridInterface, "Select"),
+        [this](fcitx::dbus::Message &msg) {
+            uint32_t serial = 0;
+            uint32_t index = 0;
+            msg >> serial >> index;
+            if (msg && msg.sender() == gridOwner_) {
+                selectGridCell(serial, index);
+            }
+            return true;
+        });
+    gridForgetSlot_ = overlayBus_->addMatch(
+        fcitx::dbus::MatchRule(kGridService, kOverlayPath, kGridInterface, "Forget"),
+        [this](fcitx::dbus::Message &msg) {
+            uint32_t serial = 0;
+            uint32_t index = 0;
+            msg >> serial >> index;
+            if (msg && msg.sender() == gridOwner_) {
+                forgetGridCell(serial, index);
+            }
+            return true;
+        });
+    gridPageSlot_ = overlayBus_->addMatch(
+        fcitx::dbus::MatchRule(kGridService, kOverlayPath, kGridInterface, "Page"),
+        [this](fcitx::dbus::Message &msg) {
+            uint32_t serial = 0;
+            int32_t delta = 0;
+            msg >> serial >> delta;
+            if (msg && msg.sender() == gridOwner_) {
+                pageGrid(serial, delta);
+            }
+            return true;
+        });
+    for (const auto type :
+         {fcitx::EventType::InputContextUpdateUI, fcitx::EventType::InputContextFocusOut}) {
+        gridEventWatchers_.push_back(instance_->watchEvent(
+            type, fcitx::EventWatcherPhase::Default, [this](fcitx::Event &event) { onGridUiEvent(event); }));
+    }
+}
+
+void WowtypeEngine::sendGridOverlay(fcitx::InputContext *ic, WowtypeState *state,
+                                    const std::string &header) {
+    const auto &all = state->candidates_;
+    const std::size_t n = all.size();
+    const std::size_t cursor = std::min(state->gridCursor_, n - 1);
+    // 只发光标所在的这一屏（和 fillGridPanel 一样一屏 kGridRows 行）
+    constexpr std::size_t perScreen = kGridCols * kGridRows;
+    const std::size_t screen = cursor / perScreen;
+    const std::size_t first = screen * perScreen;
+    std::vector<std::string> cells;
+    std::vector<uint8_t> forgettable; // 不用 vector<bool>：fcitx 的 Message 按引用遍历
+    for (std::size_t i = first; i < std::min(n, first + perScreen); ++i) {
+        cells.push_back(shownCandidate(all[i]).toString());
+        forgettable.push_back(canForgetCandidate(state, i) ? 1 : 0);
+    }
+    const OverlayCursor c = overlayCursor(ic);
+    ++gridSerial_;
+    auto msg = overlayBus_->createSignal(kOverlayPath, kGridInterface, "Show");
+    msg.setDestination(gridOwner_);
+    msg << gridSerial_ << cells << static_cast<uint32_t>(first) << static_cast<uint32_t>(cursor)
+        << static_cast<uint32_t>(kGridCols) << static_cast<uint32_t>(screen)
+        << static_cast<uint32_t>((n + perScreen - 1) / perScreen) << header << c.x << c.y << c.w << c.h
+        << c.relative << c.scale << forgettable;
+    msg.send();
+    gridIc_ = ic->watch();
+    if (gridPendingSince_) {
+        return; // 前面发的还在等回执，定时器已经开着
+    }
+    gridPendingSince_ = fcitx::now(CLOCK_MONOTONIC);
+    if (!gridAckTimer_) {
+        gridAckTimer_ = instance_->eventLoop().addTimeEvent(
+            CLOCK_MONOTONIC, gridPendingSince_ + kGridAckUsec, kTimerAccuracyUsec,
+            [this](fcitx::EventSourceTime *, uint64_t) {
+                checkGridAck();
+                return true;
+            });
+    } else {
+        gridAckTimer_->setTime(gridPendingSince_ + kGridAckUsec);
+        gridAckTimer_->setOneShot();
+    }
+}
+
+void WowtypeEngine::hideGridOverlay() {
+    gridIc_.unwatch();
+    if (overlayBus_ && !gridOwner_.empty()) {
+        auto msg = overlayBus_->createSignal(kOverlayPath, kGridInterface, "Hide");
+        msg.setDestination(gridOwner_);
+        msg << gridSerial_;
+        msg.send();
+    }
+}
+
+void WowtypeEngine::checkGridAck() {
+    if (!gridPendingSince_ || gridBroken_) {
+        return;
+    }
+    if (const uint64_t due = gridPendingSince_ + kGridAckUsec; fcitx::now(CLOCK_MONOTONIC) < due) {
+        gridAckTimer_->setTime(due);
+        gridAckTimer_->setOneShot();
+        return;
+    }
+    gridBroken_ = true;
+    gridPendingSince_ = 0;
+    WLOG_W() << "WowType: 展开面板的网格没有回应（GNOME 扩展画的时候出错了？），改用 kimpanel 的列表";
+    // 扩展要是晚一步画出来了，叫它收起；正显示着的这一屏马上换成 kimpanel 的列表
+    auto *ic = gridIc_.get();
+    hideGridOverlay();
+    if (ic) {
+        updateInputPanel(ic, ic->propertyFor(&factory_));
+    }
+}
+
+void WowtypeEngine::selectGridCell(uint32_t serial, uint32_t index) {
+    auto *ic = gridIc_.get();
+    // 只认现在显示的这一屏上点的（点的时候面板已经变了的不算）
+    if (!ic || serial != gridSerial_) {
+        return;
+    }
+    commitCandidate(ic, ic->propertyFor(&factory_), index);
+}
+
+void WowtypeEngine::forgetGridCell(uint32_t serial, uint32_t index) {
+    auto *ic = gridIc_.get();
+    if (!ic || serial != gridSerial_) {
+        return;
+    }
+    forgetCandidate(ic, ic->propertyFor(&factory_), index);
+}
+
+void WowtypeEngine::pageGrid(uint32_t serial, int32_t delta) {
+    auto *ic = gridIc_.get();
+    if (!ic || serial != gridSerial_ || delta == 0) {
+        return;
+    }
+    auto *state = ic->propertyFor(&factory_);
+    // 展开面板里会话只认翻页键本身（PageUp / PageDown 挪一屏）：只带翻页动作、不带键的话，
+    // 会话当成别的键，先把面板收起来，再去翻横排的那几个
+    const WowtypeFrame *frame =
+        sessionKey(ic, state, fcitx::Key(delta < 0 ? FcitxKey_Page_Up : FcitxKey_Page_Down));
+    if (frame && frame->handled) {
+        applySessionFrame(ic, state, frame);
+    }
+}
+
+void WowtypeEngine::onGridUiEvent(fcitx::Event &event) {
+    auto *shown = gridIc_.get();
+    if (!shown || static_cast<fcitx::InputContextEvent &>(event).inputContext() != shown) {
+        return;
+    }
+    if (event.type() == fcitx::EventType::InputContextUpdateUI) {
+        const auto &update = static_cast<fcitx::InputContextUpdateUIEvent &>(event);
+        if (update.component() != fcitx::UserInterfaceComponent::InputPanel ||
+            dynamic_cast<WowtypeGridOverlayList *>(shown->inputPanel().candidateList().get())) {
+            return; // 还是网格（光标、这一屏变了的已经发过了）
+        }
+    }
+    hideGridOverlay();
 }
 
 void WowtypeEngine::setConfig(const fcitx::RawConfig &config) {
@@ -1111,9 +1434,13 @@ void WowtypeEngine::applyConfig() {
     clipboardHistory_ = envOr("WOWTYPE_CLIPBOARD_HISTORY", *config_.clipboardHistory);
     shuangpinShowKeys_ = *config_.shuangpinShowKeys;
     shuangpinAbbrev_ = envOr("WOWTYPE_SHUANGPIN_ABBREV", *config_.shuangpinAbbrev);
-    if (!clipboardHistory_) {
+    syncEnabled_ = envOr("WOWTYPE_CLIPBOARD_SYNC", *config_.clipboardSync);
+    syncPaste_ = *config_.clipboardSyncPaste;
+    // 别的设备复制过来的也放在剪贴板历史里：同步开着时不清
+    if (!clipboardHistory_ && !syncEnabled_) {
         wowtype_clipboard_clear();
     }
+    applySync();
     autoSpaceFlags_ = *config_.autoSpace ? (*config_.autoSpaceLetters ? 1 : 0) |
                                                (*config_.autoSpaceDigits ? 2 : 0)
                                          : 0;
@@ -1123,6 +1450,7 @@ void WowtypeEngine::applyConfig() {
     autoPairPunct_ = envOr("WOWTYPE_AUTO_PAIR_PUNCT", *config_.autoPairPunct);
     typo_ = envOr("WOWTYPE_TYPO", *config_.typo);
     rareExt_ = envOr("WOWTYPE_RARE_EXT", *config_.rareExt);
+    inlineSpace_ = *config_.inlineSpace;
     shuangpin_ = envOr("WOWTYPE_SHUANGPIN", *config_.inputScheme == WowtypeInputScheme::Shuangpin);
     shuangpinScheme_ = WowtypeShuangpinSchemeToString(*config_.shuangpinScheme);
     if (const char *env = std::getenv("WOWTYPE_SHUANGPIN_SCHEME"); env && *env) {
@@ -1189,6 +1517,10 @@ void WowtypeEngine::applyConfig() {
         const char *dir = std::getenv("WOWTYPE_VOICE_MODEL_DIR");
         voice_ = wowtype_voice_new(dir);
     }
+    if (voice_) {
+        // 点按说话的静音超时（#285）：0 不自动结束，再点一下语音键结束
+        wowtype_voice_set_silence_timeout(voice_, static_cast<unsigned>(*config_.voiceSilenceTimeout));
+    }
     // 互译：环境变量 WOWTYPE_TRANSLATE_URL / _MODEL / _TARGET / _KEY_FILE 覆盖（测试用）
     translateEnabled_ = envOr("WOWTYPE_TRANSLATE", *config_.translate);
     std::string translateUrl = *config_.translateBaseUrl;
@@ -1214,7 +1546,7 @@ void WowtypeEngine::applyConfig() {
         if (*config_.translateLocal) {
             localModel = *config_.translateLocalModel;
             if (localModel.empty()) {
-                localModel = userDataDir() + "/models/HY-MT1.5-1.8B-Q4_K_M.gguf";
+                localModel = userDataDir() + "/models/Hy-MT3-1.8B-Q4_K_M.gguf";
             }
             translateModel = "本地 HY-MT";
         }
@@ -1236,7 +1568,8 @@ void WowtypeEngine::applyConfig() {
              << " 中英键=" << toggleKey_.toString() << " 互译键=" << translateModeKey_.toString()
              << " 选词键=" << static_cast<int>(selectKeys_) << " 日期时间=" << dateTime_
              << " 计算器=" << calculator_ << " 工具栏=" << toolbar_
-             << " 剪贴板历史=" << clipboardHistory_ << " 互译=" << translateEnabled_ << "("
+             << " 剪贴板历史=" << clipboardHistory_ << " 跨设备粘贴=" << syncEnabled_
+             << " 互译=" << translateEnabled_ << "("
              << (translateAvailable() ? translateModel + " → " + translateTarget : "未配置")
              << ")"
              << " 检查更新=" << *config_.checkUpdate << " 打字统计=" << typingStats_;
@@ -1333,6 +1666,10 @@ bool WowtypeEngine::canToggleMode() const {
 }
 
 WowtypeEngine::~WowtypeEngine() {
+    gridEventWatchers_.clear();
+    if (gridIc_.get()) {
+        hideGridOverlay();
+    }
     // 退出时不能无限等（#244：桌面会话结束时 fcitx5 卡在这里，等到被 SIGTERM）。后台还在载入词库的，
     // 最多等几秒；还没好就交给一个分离的线程等它载完再释放，这里不管了（进程反正要退出）
     if (loading_.valid()) {
@@ -1385,6 +1722,11 @@ WowtypeEngine::~WowtypeEngine() {
     if (translator_) {
         wowtype_translate_free(translator_);
         translator_ = nullptr;
+    }
+    syncTimer_.reset();
+    if (sync_) {
+        wowtype_sync_free(sync_);
+        sync_ = nullptr;
     }
 }
 
@@ -1528,8 +1870,12 @@ void WowtypeEngine::syncSession(WowtypeState *state) {
                                                                       : WOWTYPE_SHIFT_TOGGLE_BOTH;
     config.translate_mode = translateAvailable() ? 1 : 0;
     config.translate_key = translateModeKey_.sym() != FcitxKey_None ? 1 : 0;
+    // 互译只翻一句（#191）：双击 Shift（handleShiftKey）、互译键进「译」；翻完回去在按键（applySessionFrame）、
+    // 定时器（tickTranslate）的 frame 里，都跟着 mode_changed
+    config.translate_one_shot = *config_.translateOneShot ? 1 : 0;
     config.toolbar = toolbar_ ? 1 : 0;
-    config.clipboard_history = clipboardHistory_ ? 1 : 0;
+    // 同步开着时工具栏的「剪贴板」也要能选别的设备复制过来的
+    config.clipboard_history = (clipboardHistory_ || syncEnabled_) ? 1 : 0;
     config.shuangpin_keys = shuangpinShowKeys_ ? 1 : 0;
     config.wubi = wubi_ ? 1 : 0;
     config.wubi_auto_commit = *config_.wubiAutoCommit ? 1 : 0;
@@ -1755,6 +2101,14 @@ void WowtypeEngine::applySessionFrame(fcitx::InputContext *ic, WowtypeState *sta
         ++unsavedCommits_;
         maybeSaveUserDict(true);
     }
+    if (frame && frame->mode_changed) {
+        // 只翻一句的「译」（#191）：译文上屏、Esc、Shift+回车以后会话回到了进来前的模式，全局模式跟上、
+        // 弹提示（译文、原文在 frame 里，照「译」记统计）；候选框里的原文框收起来
+        followSessionMode(ic, state, frame);
+        translateDrawn_.clear();
+        updateInputPanel(ic, state);
+        return;
+    }
     if (frame && frame->commit) {
         // 学没学到词看 frame->learned；选了 emoji 由会话记进最近用过。
         // 候选位置从 frame->choice_index 拿（1.11），统计用。
@@ -1868,21 +2222,111 @@ std::string WowtypeEngine::recentEmojiPath() const {
     return dir.empty() ? std::string() : dir + "/emoji-recent.txt";
 }
 
-void WowtypeEngine::sampleClipboard(fcitx::InputContext *ic) {
-    if (!clipboardHistory_ || !ic) {
-        return;
-    }
-    // 密码框里不记（clipboard 插件自己也不记标成密码的内容）
-    if (ic->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive)) {
-        return;
+std::optional<std::string> WowtypeEngine::latestClipboard(fcitx::InputContext *ic) {
+    // 密码框里不读（clipboard 插件自己也不记标成密码的内容）
+    if (!ic || ic->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive)) {
+        return std::nullopt;
     }
     auto *addon = instance_->addonManager().addon("clipboard");
     if (!addon) {
+        return std::nullopt;
+    }
+    return addon->call<fcitx::IClipboard::clipboard>(ic);
+}
+
+void WowtypeEngine::sampleClipboard(fcitx::InputContext *ic) {
+    if (!clipboardHistory_) {
         return;
     }
-    const std::string text = addon->call<fcitx::IClipboard::clipboard>(ic);
-    if (!text.empty()) {
-        wowtype_clipboard_remember(text.c_str());
+    const auto text = latestClipboard(ic);
+    if (text && !text->empty()) {
+        wowtype_clipboard_remember(text->c_str());
+    }
+}
+
+std::string WowtypeEngine::syncStateFile() const {
+    if (const char *env = std::getenv("WOWTYPE_SYNC_STATE_FILE"); env && *env) {
+        return env;
+    }
+    const std::string dir = userConfigDir();
+    return dir.empty() ? std::string() : dir + "/sync.json";
+}
+
+std::string WowtypeEngine::syncRelayKeyFile() const {
+    if (const char *env = std::getenv("WOWTYPE_SYNC_RELAY_KEY_FILE"); env && *env) {
+        return env;
+    }
+    const std::string dir = userConfigDir();
+    return dir.empty() ? std::string() : dir + "/sync-relay.key";
+}
+
+void WowtypeEngine::applySync() {
+    if (!sync_ && syncEnabled_) {
+        sync_ = wowtype_sync_new();
+    }
+    if (!sync_) {
+        // 没打开过，或者核心没带同步
+        syncTimer_.reset();
+        return;
+    }
+    std::string name = *config_.clipboardSyncDeviceName;
+    if (name.empty()) {
+        char host[256] = {};
+        if (gethostname(host, sizeof(host) - 1) == 0) {
+            name = host;
+        }
+    }
+    const std::string relayUrl = *config_.clipboardSyncRelayUrl;
+    const std::string keyFile = syncRelayKeyFile();
+    const std::string stateFile = syncStateFile();
+    WowtypeSyncConfig config{};
+    config.size = sizeof(config);
+    config.enabled = syncEnabled_ ? 1 : 0;
+    config.lan = *config_.clipboardSyncLan ? 1 : 0;
+    config.relay_url = relayUrl.c_str();
+    config.relay_key_file = keyFile.c_str();
+    config.state_file = stateFile.c_str();
+    config.device_name = name.c_str();
+    // 设置没变时核心什么都不做；变了在它自己的线程里重起，不卡这里
+    wowtype_sync_configure(sync_, &config);
+    if (!syncEnabled_) {
+        syncTimer_.reset();
+        return;
+    }
+    if (!syncTimer_) {
+        constexpr uint64_t kSyncPollUsec = 1000 * 1000;
+        syncTimer_ = instance_->eventLoop().addTimeEvent(
+            CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + kSyncPollUsec, kTimerAccuracyUsec,
+            [this](fcitx::EventSourceTime *source, uint64_t) {
+                tickSync();
+                source->setNextInterval(kSyncPollUsec);
+                source->setOneShot();
+                return true;
+            });
+    }
+}
+
+void WowtypeEngine::tickSync() {
+    if (!sync_ || !syncEnabled_) {
+        return;
+    }
+    // 本机剪贴板现在是什么。核心自己看变没变：没变不发，别的设备刚传来的不往回发，
+    // 打开同步后第一次报的只当基准
+    // 空的也要报：刚开机还没复制过东西时，基准就是「空」，这样第一次复制的才发得出去。
+    // 现在读不了（密码框里）就不报，免得出了密码框把原来那条又当成新复制的
+    if (const auto text = latestClipboard(instance_->mostRecentInputContext())) {
+        wowtype_sync_observe(sync_, text->c_str());
+    }
+    // 别的设备复制过来的：核心已经记进剪贴板历史（v + 空格里能选）；这里再放进系统剪贴板，
+    // 好让 Ctrl+V 也能贴。一次来了好几条只放最新的
+    std::string latest;
+    while (const char *received = wowtype_sync_poll(sync_)) {
+        latest = received;
+        WLOG_I() << "WowType: 跨设备粘贴：收到 " << wowtype_sync_from(sync_) << " 复制的 "
+                       << latest.size() << " 字节";
+    }
+    if (!latest.empty() && syncPaste_) {
+        wowtype::copyToClipboard(latest);
     }
 }
 
@@ -2018,7 +2462,8 @@ void WowtypeEngine::updateInputPanel(fcitx::InputContext *ic,
         // 编辑区：已选的词 + 还没选的拼音（带下划线）；光标位置会话给（左右键能移到拼音中间，#129）
         fcitx::Text preedit;
         preedit.append(state->selectedText());
-        preedit.append(segmentedRemaining(state), fcitx::TextFormatFlag::Underline);
+        const std::string pinyin = segmentedRemaining(state);
+        preedit.append(inlineSpace_ && inlinePreedit(ic) ? inlineSyllables(pinyin) : pinyin, fcitx::TextFormatFlag::Underline);
         const WowtypeFrame *frame = wowtype_session_frame(state->session_);
         const std::size_t cursor = frame && frame->preedit ? frame->preedit_cursor : preedit.textLength();
         preedit.setCursor(static_cast<int>(std::min(cursor, preedit.textLength())));
@@ -2032,7 +2477,7 @@ void WowtypeEngine::updateInputPanel(fcitx::InputContext *ic,
     if (state->expanded_ && !state->candidates_.empty()) {
         fillGridPanel(ic, state);
     } else if (!state->candidates_.empty()) {
-        auto candidates = std::make_unique<WowtypeSessionList>(state);
+        auto candidates = std::make_unique<WowtypeSessionList>(this, ic, state);
         candidates->setLayoutHint(horizontal_
                                       ? fcitx::CandidateLayoutHint::Horizontal
                                       : fcitx::CandidateLayoutHint::Vertical);
@@ -2101,6 +2546,16 @@ void WowtypeEngine::fillGridPanel(fcitx::InputContext *ic, WowtypeState *state) 
     const auto &all = state->candidates_;
     const std::size_t n = all.size();
     state->gridCursor_ = std::min(state->gridCursor_, n - 1);
+    if (gridOverlay()) {
+        // GNOME 扩展画真正的网格，只有光标处那一格高亮、点格子选词（#270）。本来画在 kimpanel 候选框上的
+        // 提示和编辑区（应用自己不画编辑区时）挪到网格上面，kimpanel 什么都不画
+        auto &panel = ic->inputPanel();
+        sendGridOverlay(ic, state, panel.auxUp().toString() + panel.preedit().toString());
+        panel.setAuxUp(fcitx::Text());
+        panel.setPreedit(fcitx::Text());
+        panel.setCandidateList(std::make_unique<WowtypeGridOverlayList>());
+        return;
+    }
     const std::size_t rows = (n + kGridCols - 1) / kGridCols;
     const std::size_t cursorRow = state->gridCursor_ / kGridCols;
 
@@ -2164,7 +2619,51 @@ bool sameCandidate(WowtypeState *state, std::size_t index, const WowtypeCandidat
            shown.emoji == (info.kind == WOWTYPE_CAND_EMOJI);
 }
 
+/// 外壳抄的第 index 个候选在会话里的序号：外壳的候选是会话候选的一份拷贝，序号一样；会话的候选在显示以后
+/// 变了（上文、设置、引擎变了又没刷新）就找同一个词，找不到是 SIZE_MAX。
+std::size_t sessionIndex(WowtypeState *state, std::size_t index) {
+    if (index >= state->candidates_.size()) {
+        return SIZE_MAX;
+    }
+    const WowtypeCandidate &shown = state->candidates_[index];
+    if (sameCandidate(state, index, shown)) {
+        return index;
+    }
+    const std::size_t total = wowtype_session_candidate_total(state->session_);
+    for (std::size_t i = 0; i < total; ++i) {
+        if (sameCandidate(state, i, shown)) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
 } // namespace
+
+bool WowtypeEngine::canForgetCandidate(WowtypeState *state, std::size_t index) const {
+    if (!state || state->panel() != WOWTYPE_TOOL_NONE || !state->composing()) {
+        return false;
+    }
+    const std::size_t at = sessionIndex(state, index);
+    return at != SIZE_MAX && wowtype_session_can_forget(state->session_, at) == 1;
+}
+
+void WowtypeEngine::forgetCandidate(fcitx::InputContext *ic, WowtypeState *state, std::size_t index) {
+    if (!ic || !state || state->panel() != WOWTYPE_TOOL_NONE || !state->composing()) {
+        return;
+    }
+    const std::size_t at = sessionIndex(state, index);
+    if (at == SIZE_MAX) {
+        refreshCandidates(state);
+        updateInputPanel(ic, state);
+        return;
+    }
+    // 和 Ctrl+Delete 一样由会话忘：忘掉了 frame 带 forgot（applySessionFrame 马上存），候选重算了照会话重画
+    const WowtypeFrame *frame = wowtype_session_forget(state->session_, at);
+    if (frame && frame->handled) {
+        applySessionFrame(ic, state, frame);
+    }
+}
 
 void WowtypeEngine::commitCandidate(fcitx::InputContext *ic,
                                     WowtypeState *state, std::size_t index) {
@@ -2175,23 +2674,12 @@ void WowtypeEngine::commitCandidate(fcitx::InputContext *ic,
         choosePanelItem(ic, state, index);
         return;
     }
-    // 选词、上屏、学习由会话做；外壳的候选是会话候选的一份拷贝，序号一样
-    const WowtypeCandidate chosen = state->candidates_[index];
-    if (!sameCandidate(state, index, chosen)) {
-        // 会话的候选在显示以后变了（上文、设置、引擎变了又没刷新）：选同一个词，找不到就只刷新显示
-        index = SIZE_MAX;
-        const std::size_t total = wowtype_session_candidate_total(state->session_);
-        for (std::size_t i = 0; i < total; ++i) {
-            if (sameCandidate(state, i, chosen)) {
-                index = i;
-                break;
-            }
-        }
-        if (index == SIZE_MAX) {
-            refreshCandidates(state);
-            updateInputPanel(ic, state);
-            return;
-        }
+    // 选词、上屏、学习由会话做；会话的候选变了就选同一个词，找不到就只刷新显示
+    index = sessionIndex(state, index);
+    if (index == SIZE_MAX) {
+        refreshCandidates(state);
+        updateInputPanel(ic, state);
+        return;
     }
     const WowtypeFrame *frame = wowtype_session_choose(state->session_, index);
     if (!frame || !frame->handled) {
@@ -2227,6 +2715,9 @@ void WowtypeEngine::keyEvent(const fcitx::InputMethodEntry & /*entry*/,
     auto *state = ic->propertyFor(&factory_);
     const fcitx::Key key = event.key();
     const auto sym = key.sym();
+    if (sync_ && syncEnabled_) {
+        wowtype_sync_touch(sync_);
+    }
     // 上屏后还没发的挪光标（自动配对）先发：应用要先把光标放好，再收到这个键或这个键上屏的字。
     // 这时应用报的周围文字还是挪之前的
     surroundingStale_ = flushCursorDelta();
@@ -2400,6 +2891,10 @@ void WowtypeEngine::activate(const fcitx::InputMethodEntry & /*entry*/,
     // 最近用过的 emoji 在核心里（所有输入框共用），存在 ~/.local/share/wowtype/emoji-recent.txt
     wowtype_recent_emoji_path(recentEmojiPath().c_str());
     sampleClipboard(ic);
+    if (sync_ && syncEnabled_) {
+        // 有人在用：中转服务那边保持连接，别的设备复制的马上能到
+        wowtype_sync_touch(sync_);
+    }
     maybeCheckUpdate();
 }
 
@@ -3026,7 +3521,9 @@ uint32_t WowtypeEngine::tickTranslate() {
     }
     if (frame->mode_changed) {
         // 单按 Shift 等双击等到了时间（#253）：现在切，弹「中 / 英」提示（打到一半切英文时字母在 frame 里）
+        // 只翻一句的「译」按过回车、译好了（#191）：上屏译文，回到进来前的模式
         const uint32_t wake = frame->wake_after_ms;
+        translateDrawn_.clear();
         followSessionMode(ic, state, frame);
         return wake;
     }

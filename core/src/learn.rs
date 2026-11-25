@@ -13,7 +13,7 @@
 //! 存盘时淘汰一些（[`save_history`]）：只用过一次、又很久没再用的不存；条数超过上限时不存最冷的。
 //! 不淘汰的话文件只会变长——用一两周就有九千多行，每次存盘都整份重写。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -83,6 +83,30 @@ pub struct NewWord {
     pub at_ms: u64,
 }
 
+/// 用户主动从候选框里选过的英文原串（`english.txt` 里没有的，如人名 `Verah`）。
+///
+/// 存的是用户选中时的写法，查的时候用小写（[`english_word_key`]）。只有回车上屏的原始字母串
+/// 永远不学（终端里的密码会明文留下）；从候选框里选是明确的「我要这个词」，可以学。
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnglishWord {
+    /// 上屏写法（`Verah`）。用户下次打 `verah` 时用它还原大小写。
+    pub text: String,
+    /// 选用热度，和词的热度一样衰减。
+    pub entry: HistoryEntry,
+    /// 选够 [`crate::EngineConfig::auto_learn_threshold`] 次、已经收下（排到首选）。
+    /// 收下以后一直算数，热度衰减到门槛以下也不收回。
+    pub learned: bool,
+}
+
+/// 英文原串的查表键：纯 ASCII 字母、长度 2~32 的小写形式；不是这样的不学。
+pub fn english_word_key(text: &str) -> Option<String> {
+    ((2..=32).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_alphabetic()))
+        .then(|| text.to_ascii_lowercase())
+}
+
+/// 最多存这么多个用户英文原串（`e` 行），淘汰规则和词一样。
+pub const MAX_ENGLISH: usize = 5_000;
+
 /// 一次学习改了什么：改之前、改之后的值（None 是没有这一条）。撤销时只在现在的值还等于「之后」时
 /// 才改回「之前」，后来又被别的学习改过的不动。
 #[derive(Clone, Debug, PartialEq)]
@@ -113,6 +137,12 @@ pub enum Change {
         word: String,
         before: Option<NewWord>,
         after: Option<NewWord>,
+    },
+    /// 用户英文原串（e 行），键是小写。
+    EnglishWord {
+        key: String,
+        before: Option<EnglishWord>,
+        after: Option<EnglishWord>,
     },
 }
 
@@ -223,6 +253,11 @@ impl UserPairs {
             Some(entry) => (PAIR_WEIGHT * (1.0 + decayed(entry, at_ms)).ln()).min(PAIR_BONUS_CAP),
             None => 0.0,
         }
+    }
+
+    /// 有没有 word 在前的搭配（查一次表；它在后的要扫一遍全部，见 [`UserPairs::remove_word`]）。
+    pub fn has_prev(&self, word: &str) -> bool {
+        self.map.contains_key(word)
     }
 
     /// 去掉和 word 有关的搭配（它在前或在后的都去掉），返回去掉了几条。
@@ -342,19 +377,22 @@ fn plain_ascii(text: &str) -> bool {
 /// p <前一个词> <后一个词> <热度> <上次使用>
 /// n <候选新词> <拼音> <第一次拼出来的时间>
 /// f <忘掉的词> <忘掉的时间>（[`history_text_with`] 才写，见 [`FORGOTTEN_TTL_MS`]）
+/// e <用户选中的英文原串> <热度> <上次使用> <1 已收下 / 0 还没选够>
 /// ```
 ///
 /// 热度是上次使用时衰减过的次数，可以带小数（最多三位；旧版本只写整数，读得进来）。
 /// now_ms 时热度已经低于 [`PRUNE_HEAT`] 的、过了 [`NEW_WORD_TTL_MS`] 的候选新词不写；
-/// 超过 [`MAX_WORDS`] / [`MAX_PAIRS`] 的不写最冷的。内存里的不动（这次会话里排序不变）。
-/// 没有一个非 ASCII 字符的词（回车上屏的原始字母串、英文词）不写也不载入，见 [`plain_ascii`]。
+/// 超过 [`MAX_WORDS`] / [`MAX_PAIRS`] / [`MAX_ENGLISH`] 的不写最冷的。内存里的不动（这次会话里排序不变）。
+/// `w` / `p` / `n` 里没有一个非 ASCII 字符的词（回车上屏的原始字母串、英文词）不写也不载入，
+/// 见 [`plain_ascii`]；用户主动选过的英文原串走 `e` 行，和 `w` 互不影响。
 pub fn history_text(
     words: &HashMap<String, HistoryEntry>,
     pairs: &UserPairs,
     new_words: &HashMap<String, NewWord>,
+    english: &HashMap<String, EnglishWord>,
     now_ms: u64,
 ) -> String {
-    history_text_with(words, pairs, new_words, &Forgotten::new(), now_ms)
+    history_text_with(words, pairs, new_words, &Forgotten::new(), english, now_ms)
 }
 
 /// [`history_text`] 再加上忘掉的词（`f` 行）：过了 [`FORGOTTEN_TTL_MS`] 的不写，最多写最近的 [`MAX_FORGOTTEN`] 个。
@@ -364,6 +402,7 @@ pub fn history_text_with(
     pairs: &UserPairs,
     new_words: &HashMap<String, NewWord>,
     forgotten: &Forgotten,
+    english: &HashMap<String, EnglishWord>,
     now_ms: u64,
 ) -> String {
     let history = words;
@@ -416,6 +455,10 @@ pub fn history_text_with(
             one_column(w)
                 && now_ms.saturating_sub(**at) <= FORGOTTEN_TTL_MS
                 && history.get(w.as_str()).map_or(true, |e| e.last_used_ms <= **at)
+                // 忘掉以后又选了的英文原串（e 行的时间更晚）也算又要了
+                && english_word_key(w)
+                    .and_then(|key| english.get(&key))
+                    .map_or(true, |e| e.entry.last_used_ms <= **at)
         })
         .collect();
     forgotten.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
@@ -423,6 +466,37 @@ pub fn history_text_with(
     forgotten.sort_by(|a, b| a.0.cmp(b.0));
     for (word, at) in forgotten {
         out.push_str(&format!("f\t{word}\t{at}\n"));
+    }
+    let mut english: Vec<_> = english
+        .iter()
+        .filter(|(key, word)| {
+            one_column(key)
+                && english_word_key(key).as_deref() == Some(key.as_str())
+                && english_word_key(&word.text).as_deref() == Some(key.as_str())
+                && live(&word.entry)
+        })
+        .map(|(key, word)| (key.clone(), word.clone()))
+        .collect();
+    if english.len() > MAX_ENGLISH {
+        let entries: Vec<(String, HistoryEntry)> = english
+            .iter()
+            .map(|(key, word)| (key.clone(), word.entry))
+            .collect();
+        let kept: HashSet<String> = kept_for_save(entries, now_ms, MAX_ENGLISH)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        english.retain(|(key, _)| kept.contains(key));
+    }
+    english.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, word) in english {
+        out.push_str(&format!(
+            "e\t{}\t{}\t{}\t{}\n",
+            word.text,
+            heat_text(word.entry.count),
+            word.entry.last_used_ms,
+            u8::from(word.learned)
+        ));
     }
     out
 }
@@ -461,9 +535,10 @@ pub fn save_history<P: AsRef<Path>>(
     words: &HashMap<String, HistoryEntry>,
     pairs: &UserPairs,
     new_words: &HashMap<String, NewWord>,
+    english: &HashMap<String, EnglishWord>,
     now_ms: u64,
 ) -> Result<()> {
-    let text = history_text(words, pairs, new_words, now_ms);
+    let text = history_text(words, pairs, new_words, english, now_ms);
     // 先写临时文件再改名，写到一半断电也不会把旧文件弄坏
     crate::fsutil::write_atomic(path.as_ref(), text.as_bytes())
 }
@@ -479,8 +554,9 @@ pub fn load_history<P: AsRef<Path>>(
     words: &mut HashMap<String, HistoryEntry>,
     pairs: &mut UserPairs,
     new_words: &mut HashMap<String, NewWord>,
+    english: &mut HashMap<String, EnglishWord>,
 ) -> Result<usize> {
-    load_history_with(path, words, pairs, new_words, &mut Forgotten::new())
+    load_history_with(path, words, pairs, new_words, &mut Forgotten::new(), english)
 }
 
 /// [`load_history`] 再读忘掉的词（`f` 行，和内存里的合并，同一个词留晚的那次），读完用 [`apply_forgotten`]：
@@ -491,6 +567,7 @@ pub fn load_history_with<P: AsRef<Path>>(
     pairs: &mut UserPairs,
     new_words: &mut HashMap<String, NewWord>,
     forgotten: &mut Forgotten,
+    english: &mut HashMap<String, EnglishWord>,
 ) -> Result<usize> {
     let path = path.as_ref();
     let (lines, _bad) = crate::fsutil::read_lines_lossy(path)
@@ -549,9 +626,40 @@ pub fn load_history_with<P: AsRef<Path>>(
                     loaded += 1;
                 }
             }
+            ["e", word, count, last, learned] => {
+                let Some(key) = english_word_key(word) else {
+                    continue;
+                };
+                let learned = match *learned {
+                    "1" => true,
+                    "0" => false,
+                    _ => continue,
+                };
+                if let Some(entry) = entry(count, last) {
+                    // 和 w / p 行一样，几个进程合并时留最近用过的那份；收下过就一直算数
+                    let slot = english.entry(key).or_insert_with(|| EnglishWord {
+                        text: (*word).to_string(),
+                        entry,
+                        learned,
+                    });
+                    if entry.last_used_ms > slot.entry.last_used_ms {
+                        slot.text = (*word).to_string();
+                        slot.entry = entry;
+                        slot.learned = learned;
+                    } else if entry.last_used_ms == slot.entry.last_used_ms {
+                        slot.learned |= learned;
+                    }
+                    loaded += 1;
+                }
+            }
             _ => {}
         }
     }
+    // 忘掉的英文原串：忘掉之前收下的不算；忘掉以后又选的（热度时间更晚）留着
+    english.retain(|key, word| {
+        let at = forgotten.get(&word.text).or_else(|| forgotten.get(key.as_str()));
+        at.map_or(true, |at| word.entry.last_used_ms > *at)
+    });
     apply_forgotten(forgotten, words, pairs, new_words);
     Ok(loaded)
 }
@@ -560,6 +668,17 @@ pub fn load_history_with<P: AsRef<Path>>(
 mod tests {
     use super::*;
     use crate::lm::BigramLm;
+
+    /// 只看 word 在前的搭配（右键菜单的「忘掉这个词」看它，#229）。
+    #[test]
+    fn pairs_has_prev() {
+        let mut pairs = UserPairs::default();
+        pairs.learn("我特", "你好", 1);
+        assert!(pairs.has_prev("我特"));
+        assert!(!pairs.has_prev("你好") && !pairs.has_prev("别的"));
+        assert_eq!(pairs.remove_word("你好"), 1);
+        assert!(!pairs.has_prev("我特"));
+    }
 
     /// 忘掉的词（f 行）：读回来、合并时去掉在忘掉之前学到的，留着之后又用过的；过期的、又用过的不写。
     #[test]
@@ -577,7 +696,14 @@ mod tests {
         let mut new_words = HashMap::new();
         new_words.insert("旧词".to_string(), NewWord { pinyin: "jiu ci".into(), at_ms: 800 });
         let mut forgotten = Forgotten::new();
-        load_history_with(&path, &mut words, &mut pairs, &mut new_words, &mut forgotten).unwrap();
+        load_history_with(
+            &path,
+            &mut words,
+            &mut pairs,
+            &mut new_words,
+            &mut forgotten,
+            &mut HashMap::new(),
+        ).unwrap();
         assert!(!words.contains_key("旧词"), "内存里、文件里忘掉之前的热度都去掉");
         assert_eq!(words["又用了"].count, 2.0, "忘掉以后又用过的留着");
         assert_eq!(pairs.len(), 1, "和忘掉的词有关的搭配去掉，别的留着");
@@ -587,13 +713,19 @@ mod tests {
 
         forgotten.insert("很久以前".into(), 5);
         let now = 5 + FORGOTTEN_TTL_MS + 1;
-        let text = history_text_with(&words, &pairs, &new_words, &forgotten, 2000);
+        let text = history_text_with(&words, &pairs, &new_words, &forgotten, &HashMap::new(), 2000);
         assert!(text.contains("f\t旧词\t1000\n") && text.contains("f\t很久以前\t5\n"));
-        let text = history_text_with(&words, &pairs, &new_words, &forgotten, now);
+        let text = history_text_with(&words, &pairs, &new_words, &forgotten, &HashMap::new(), now);
         assert!(!text.contains("很久以前"), "过期的不写");
         // 旧版本的读法跳过 f 行
         let mut w2 = HashMap::new();
-        load_history(&path, &mut w2, &mut UserPairs::default(), &mut HashMap::new()).unwrap();
+        load_history(
+            &path,
+            &mut w2,
+            &mut UserPairs::default(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        ).unwrap();
         assert!(w2.contains_key("又用了"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -617,7 +749,13 @@ mod tests {
         pairs.insert("旧的".into(), "搭配".into(), HistoryEntry { count: 1.0, last_used_ms: 3000 });
         let mut new_words = HashMap::new();
         new_words.insert("新词".to_string(), NewWord { pinyin: "xin ci".into(), at_ms: 100 });
-        load_history(&path, &mut words, &mut pairs, &mut new_words).unwrap();
+        load_history(
+            &path,
+            &mut words,
+            &mut pairs,
+            &mut new_words,
+            &mut HashMap::new(),
+        ).unwrap();
         // 文件里的更新：用文件的；内存里的更新：留着；只在文件里的：加进来
         assert_eq!(words["你好"].count, 5.0);
         assert_eq!(words["世界"].count, 4.0);
@@ -643,10 +781,14 @@ mod tests {
         let mut words = HashMap::new();
         let mut pairs = UserPairs::default();
         let mut new_words = HashMap::new();
-        assert_eq!(load_history(&path, &mut words, &mut pairs, &mut new_words).unwrap(), 2);
+        assert_eq!(
+            load_history(&path, &mut words, &mut pairs, &mut new_words, &mut HashMap::new())
+                .unwrap(),
+            2
+        );
         assert!(words.contains_key("你好"));
         assert!(!words.contains_key("hunter2pass"));
-        save_history(&path, &words, &pairs, &new_words, 1000).unwrap();
+        save_history(&path, &words, &pairs, &new_words, &HashMap::new(), 1000).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("hunter2pass") && !text.contains("secret"), "{text}");
         assert!(text.contains("你好\t世界"));
@@ -746,7 +888,7 @@ mod tests {
                 at_ms: 40,
             },
         );
-        save_history(&path, &words, &pairs, &new_words, 42).unwrap();
+        save_history(&path, &words, &pairs, &new_words, &HashMap::new(), 42).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("w\t衰减过\t1.26\t42\n"), "带小数的热度：{text}");
         assert!(text.contains("w\t种地\t3\t42\n"), "整数照旧：{text}");
@@ -754,7 +896,10 @@ mod tests {
         let mut w2 = HashMap::new();
         let mut p2 = UserPairs::default();
         let mut n2 = HashMap::new();
-        assert_eq!(load_history(&path, &mut w2, &mut p2, &mut n2).unwrap(), 4);
+        assert_eq!(
+            load_history(&path, &mut w2, &mut p2, &mut n2, &mut HashMap::new()).unwrap(),
+            4
+        );
         assert_eq!(w2["种地"].count, 3.0);
         assert_eq!(w2["衰减过"].count, 1.26);
         assert_eq!(p2.get("发", "给").unwrap().count, 1.0);
@@ -762,10 +907,79 @@ mod tests {
 
         // 存盘时丢掉衰减到几乎没有的记录、过期的候选新词
         let later = 42 + 6 * HALF_LIFE_MS as u64;
-        let text = history_text(&w2, &p2, &n2, later);
+        let text = history_text(&w2, &p2, &n2, &HashMap::new(), later);
         assert!(!text.contains("衰减过"), "{text}");
         assert!(!text.contains("霜频阁"), "{text}");
         assert!(text.contains("种地"), "3 次的还在（6 个半衰期后约 0.05）：{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn english_words_round_trip_with_learned_flag() {
+        let dir = std::env::temp_dir().join(format!("wowtype-english-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.tsv");
+        let mut english = HashMap::new();
+        english.insert(
+            "verah".to_string(),
+            EnglishWord {
+                text: "Verah".to_string(),
+                entry: entry(3, 42),
+                learned: true,
+            },
+        );
+        // 还没选够的也存：重启以后接着数
+        english.insert(
+            "zhang".to_string(),
+            EnglishWord {
+                text: "Zhang".to_string(),
+                entry: entry(1, 40),
+                learned: false,
+            },
+        );
+        // 带数字/符号的不是英文原串，不写
+        english.insert(
+            "pass123".to_string(),
+            EnglishWord {
+                text: "pass123".to_string(),
+                entry: entry(9, 42),
+                learned: true,
+            },
+        );
+        save_history(
+            &path,
+            &HashMap::new(),
+            &UserPairs::default(),
+            &HashMap::new(),
+            &english,
+            42,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("e\tVerah\t3\t42\t1\n"), "{text}");
+        assert!(text.contains("e\tZhang\t1\t40\t0\n"), "{text}");
+        assert!(!text.contains("pass123"), "{text}");
+
+        let mut words = HashMap::new();
+        let mut pairs = UserPairs::default();
+        let mut new_words = HashMap::new();
+        let mut loaded_english = HashMap::new();
+        assert_eq!(
+            load_history(
+                &path,
+                &mut words,
+                &mut pairs,
+                &mut new_words,
+                &mut loaded_english
+            )
+            .unwrap(),
+            2
+        );
+        let verah = &loaded_english["verah"];
+        assert_eq!(verah.text, "Verah");
+        assert_eq!(verah.entry.count, 3.0);
+        assert!(verah.learned);
+        assert!(!loaded_english["zhang"].learned);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -785,13 +999,24 @@ mod tests {
         let mut words = HashMap::new();
         let mut pairs = UserPairs::default();
         let mut new_words = HashMap::new();
-        assert_eq!(load_history(&path, &mut words, &mut pairs, &mut new_words).unwrap(), 2);
+        assert_eq!(
+            load_history(&path, &mut words, &mut pairs, &mut new_words, &mut HashMap::new())
+                .unwrap(),
+            2
+        );
         assert_eq!(words.len(), 1);
         assert_eq!(words["种地"].count, 3.0);
         assert_eq!(pairs.get("发", "给").unwrap().count, 2.0);
         std::fs::remove_dir_all(&dir).ok();
         // 文件不存在还是报错
-        assert!(load_history(&path, &mut words, &mut pairs, &mut new_words).is_err());
+        assert!(load_history(
+            &path,
+            &mut words,
+            &mut pairs,
+            &mut new_words,
+            &mut HashMap::new()
+        )
+        .is_err());
     }
 
     const DAY_MS: u64 = 24 * 3600 * 1000;
@@ -812,11 +1037,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wowtype-learn-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("history.tsv");
-        save_history(&path, words, pairs, &HashMap::new(), now_ms).unwrap();
+        save_history(&path, words, pairs, &HashMap::new(), &HashMap::new(), now_ms).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let mut w2 = HashMap::new();
         let mut p2 = UserPairs::default();
-        load_history(&path, &mut w2, &mut p2, &mut HashMap::new()).unwrap();
+        load_history(&path, &mut w2, &mut p2, &mut HashMap::new(), &mut HashMap::new()).unwrap();
         std::fs::remove_dir_all(&dir).ok();
         (w2, p2, text)
     }

@@ -129,6 +129,14 @@ STATE_FILE = os.path.join(STATE_DIR, "state.json")
 # 互译用的 API Key 单独存一个只有自己能读的文件（wowtype.conf 别的程序也能读），插件每次请求时现读
 TRANSLATE_KEY_FILE = os.environ.get("WOWTYPE_TRANSLATE_KEY_FILE") or os.path.join(
     _xdg("XDG_CONFIG_HOME", "~/.config"), "wowtype", "translate.key")
+# 跨设备复制粘贴：配对文件（设备编号、组密钥、配过对的设备）和中转服务的访问口令，都只有自己能读。
+# 配对由 wowtype-sync 命令行做（和插件用的是同一份代码），插件盯着配对文件、变了自己跟上
+SYNC_STATE_FILE = os.environ.get("WOWTYPE_SYNC_STATE_FILE") or os.path.join(
+    _xdg("XDG_CONFIG_HOME", "~/.config"), "wowtype", "sync.json")
+SYNC_RELAY_KEY_FILE = os.environ.get("WOWTYPE_SYNC_RELAY_KEY_FILE") or os.path.join(
+    _xdg("XDG_CONFIG_HOME", "~/.config"), "wowtype", "sync-relay.key")
+SYNC_RELAY_GUIDE = f"{HOMEPAGE}/tree/main/relay/cloudflare"
+SYNC_PORT = 39217
 ISSUES_URL = f"{HOMEPAGE}/issues/new"
 # 界面上的中文标点要用简体中文字体画，见 SettingsApp.update_font_css；装了哪个用哪个
 CJK_SC_FONTS = ["Noto Sans CJK SC", "Source Han Sans SC", "Source Han Sans CN",
@@ -350,6 +358,7 @@ DEFAULTS = {
     "FuzzyEngOng": "False",
     "TypoCorrection": "True",
     "RareExtChars": "False",
+    "InlineSpaceSeparator": "False",
     "InputScheme": "Quanpin",
     "ShuangpinScheme": "Ziranma",
     "ShuangpinShowKeys": "False",
@@ -368,6 +377,11 @@ DEFAULTS = {
     "Calculator": "True",
     "Toolbar": "True",
     "ClipboardHistory": "False",
+    "ClipboardSync": "False",
+    "ClipboardSyncLan": "True",
+    "ClipboardSyncRelayUrl": "",
+    "ClipboardSyncDeviceName": "",
+    "ClipboardSyncPaste": "True",
     "AutoSpace": "False",
     "AutoSpaceLetters": "True",
     "AutoSpaceDigits": "True",
@@ -375,6 +389,8 @@ DEFAULTS = {
     "Voice": "True",
     "VoiceCopy": "False",
     "VoiceKey": "Alt_R",
+    # 点按说话时没声音多久自动结束，毫秒；0 不自动结束（见 VOICE_SILENCE_TIMEOUTS）
+    "VoiceSilenceTimeout": "1500",
     "EmojiSuggest": "True",
     "EmojiKey": "Super+period",
     "ToggleKey": "",
@@ -384,6 +400,7 @@ DEFAULTS = {
     "TranslateBaseUrl": "",
     "TranslateModel": "",
     "TranslateFormal": "False",
+    "TranslateOneShot": "False",
     "TranslateLocal": "True",
     "TranslateLocalModel": "",
     "TranslateLlamaServer": "",
@@ -403,6 +420,7 @@ DEFAULTS = {
 RANGES = {
     "PageSize": (3, 9),
     "TranslateIdleMinutes": (0, 240),
+    "VoiceSilenceTimeout": (0, 60000),
 }
 
 # 互译语言（存盘名和插件的 WowtypeTranslateTarget、core/src/translate.rs 的 LANGUAGES 一致）
@@ -1047,6 +1065,28 @@ VOICE_KEYS = [
     ("F10", "F10"),
 ]
 
+# 「停顿多久自动结束」（VoiceSilenceTimeout，毫秒）：名字、选项、说明和 macOS、Windows 的设置一样（spec/config.json）
+VOICE_SILENCE_TITLE = "停顿多久自动结束"
+VOICE_SILENCE_INFO = ("点按说话时没声音多久就自动结束；选「不自动结束」时再点一下语音键结束。"
+                      "一次最长录 2 分钟，到了也会结束。长按说话松开就结束，不受这一项影响。")
+VOICE_SILENCE_TIMEOUTS = [
+    ("1.5 秒", "1500"),
+    ("3 秒", "3000"),
+    ("5 秒", "5000"),
+    ("10 秒", "10000"),
+    ("30 秒", "30000"),
+    ("不自动结束", "0"),
+]
+
+
+def voice_silence_options(current):
+    """下拉框的 (名字, 值)：文件里写了别的数（2000）时多一项「其他（2000 毫秒）」。"""
+    options = list(VOICE_SILENCE_TIMEOUTS)
+    if current not in [value for _label, value in options]:
+        options.append((f"其他（{current} 毫秒）", current))
+    return options
+
+
 EMOJI_KEYS = [
     ("Super + .", "Super+period"),
     ("Ctrl + ;", "Control+semicolon"),
@@ -1067,6 +1107,10 @@ TRANSLATE_MODE_KEYS = [
 TOGGLE_KEY_INFO = "按它在中文、英文之间切（在「译」里按回到中文）。单按 Shift 照常能用。"
 TRANSLATE_MODE_KEY_INFO = ("按它进「译」，在「译」里再按回到原来的模式。设了它，单按 Shift 就只在中文、英文之间切。\n\n"
                            "要先在「翻译」页打开互译；没打开、密码框里这个键交给应用。")
+# 「翻译」页「双击 Shift 单次互译」的说明（和 macOS 设置的一样，#191）
+ONE_SHOT_INFO = ("打开后单按 Shift 只在中文、英文之间切；很快连按两下 Shift（或按互译的快捷键）进「译」，只翻这一句："
+                 "译文上屏、Esc、Shift+回车或单按 Shift 放弃以后，回到原来的中文或英文。拼音打到一半时连按两下，打的拼音带进「译」接着打。\n\n"
+                 "关着时和以前一样：单按 Shift 在 中 → 英 → 译 之间切，连按两下 Shift 不切换。")
 
 # 合法拼音音节（和 core/src/syllable.rs 的 SYLLABLES 一致，核心的测试会比对；macOS 设置直接用核心的）
 SYLLABLES = frozenset("""
@@ -3396,6 +3440,91 @@ CHECK_TOOL = shutil.which("wowtype-check") or os.path.join(os.path.dirname(os.pa
                                                            "wowtype-check")
 
 
+# 跨设备复制粘贴的配对工具（核心的一部分）。老的安装包、不带同步编的核心里没有它
+def sync_tool():
+    return os.environ.get("WOWTYPE_SYNC_BIN") or shutil.which("wowtype-sync") or next(
+        (path for path in (
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "wowtype-sync"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "release",
+                         "wowtype-sync"),
+        ) if os.access(path, os.X_OK)), None)
+
+
+def sync_devices(path=None):
+    """配对文件里记着的：（配没配对, 一起配过对的设备的名字）。不读、不显示组密钥。"""
+    try:
+        with open(path or SYNC_STATE_FILE, encoding="utf-8") as f:
+            state = json.load(f)
+        names = [str(d.get("name") or "没起名字的设备") for d in state.get("devices", [])]
+        return bool(state.get("group_key")), names
+    except (OSError, ValueError, AttributeError):
+        return False, []
+
+
+def sync_command(command, values, *more):
+    """wowtype-sync 的命令行：照设置带上配对文件、设备名、局域网开没开、中转服务。口令只给文件名。"""
+    args = [sync_tool(), command, *more, "--state", SYNC_STATE_FILE,
+            "--name", values.get("ClipboardSyncDeviceName", "").strip() or os.uname().nodename]
+    if values.get("ClipboardSyncLan", "True") != "True":
+        args.append("--no-lan")
+    relay = values.get("ClipboardSyncRelayUrl", "").strip()
+    if relay:
+        args += ["--relay", relay, "--relay-key-file", SYNC_RELAY_KEY_FILE]
+    # 测试、排查用：加入时不靠广播找，直接连这个 地址:端口（广播被防火墙挡了的时候）
+    host = os.environ.get("WOWTYPE_SYNC_PAIR_HOST")
+    if command == "pair-join" and host:
+        args += ["--host", host]
+    return args
+
+
+def sync_result(output):
+    """wowtype-sync 最后一行：paired 名字 / ok → (True, 名字)；error 说明 → (False, 说明)。"""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    last = lines[-1] if lines else ""
+    word, _, rest = last.partition(" ")
+    if word in ("paired", "ok"):
+        return True, rest
+    return False, rest if word == "error" and rest else "配对工具没有回话"
+
+
+def sync_self_test():
+    """配对文件、命令行参数、结果的解析。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "sync.json")
+        assert sync_devices(path) == (False, [])
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("坏了")
+        assert sync_devices(path) == (False, [])
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"device_id": "00", "group_key": None, "devices": []}, f)
+        assert sync_devices(path) == (False, [])
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"group_key": "abc", "devices": [{"id": "1", "name": "书房"}, {"id": "2"}]}, f)
+        assert sync_devices(path) == (True, ["书房", "没起名字的设备"])
+    assert sync_result("code 123456 300\npaired 书房 的电脑\n") == (True, "书房 的电脑")
+    assert sync_result("ok\n") == (True, "")
+    assert sync_result("error 配对码不对\n") == (False, "配对码不对")
+    assert sync_result("") == (False, "配对工具没有回话")
+    global sync_tool
+    real = sync_tool
+    sync_tool = lambda: "wowtype-sync"  # noqa: E731
+    try:
+        args = sync_command("pair-join", {"ClipboardSyncDeviceName": " 客厅 "}, "123456")
+        assert args[:3] == ["wowtype-sync", "pair-join", "123456"] and args[-2:] == ["--name", "客厅"]
+        assert "--no-lan" not in args and "--relay" not in args
+        args = sync_command("pair-host", {"ClipboardSyncLan": "False",
+                                          "ClipboardSyncRelayUrl": " https://r.example.workers.dev "})
+        assert "--no-lan" in args
+        assert args[-4:] == ["--relay", "https://r.example.workers.dev",
+                             "--relay-key-file", SYNC_RELAY_KEY_FILE]
+        # 访问口令不出现在命令行里
+        assert args[args.index("--name") + 1] == os.uname().nodename
+    finally:
+        sync_tool = real
+    print("sync self-test ok")
+
+
 def check_nnlm_file(path):
     """用核心的读取代码试着解析模型：读得出来返回字表大小，读不出来抛 ValueError。"""
     if not os.access(CHECK_TOOL, os.X_OK):
@@ -3778,17 +3907,20 @@ def lexicon_self_test():
 # ---------------------------------------------------------------- 互译
 
 
-# 本地翻译模型：腾讯混元 HY-MT 1.5 1.8B（GGUF，Q4_K_M）。不随 WowType 分发，用户确认许可后下载
-LOCAL_MODEL_FILE = "HY-MT1.5-1.8B-Q4_K_M.gguf"
+# 本地翻译模型：腾讯混元 Hy-MT3 1.8B（GGUF，Q4_K_M，Apache-2.0）。不随 WowType 分发，用户点了才下载
+LOCAL_MODEL_FILE = "Hy-MT3-1.8B-Q4_K_M.gguf"
 LOCAL_MODEL_URL = os.environ.get("WOWTYPE_LOCAL_MODEL_URL") or (
-    "https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF/resolve/main/" + LOCAL_MODEL_FILE)
+    "https://huggingface.co/tencent/Hy-MT3-1.8B-GGUF/resolve/main/" + LOCAL_MODEL_FILE)
 LOCAL_MODEL_SHA256 = os.environ.get("WOWTYPE_LOCAL_MODEL_SHA256") or (
-    "4383ac0c3c8e476de98ff979c2a3f069f8c4fb385e7860cf2d28da896cc477c7")
-LOCAL_MODEL_SIZE = 1133080512
-LOCAL_MODEL_PAGE = "https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF"
-LOCAL_MODEL_LICENSE = LOCAL_MODEL_PAGE + "/blob/main/License.txt"
-LOCAL_MODEL_TERMS = ("模型属于腾讯，用的是《腾讯混元社区许可协议》：不适用于欧盟、英国和韩国境内，"
-                     "月活超过 1 亿的产品要另外向腾讯申请。模型从 Hugging Face 下载，WowType 不分发它。")
+    "bae6e591103654ff43ef0de7d1492f6e6df1f955505f6bb2cc52e86fc399a942")
+LOCAL_MODEL_SIZE = 1348432160
+LOCAL_MODEL_PAGE = "https://huggingface.co/tencent/Hy-MT3-1.8B-GGUF"
+LOCAL_MODEL_LICENSE = LOCAL_MODEL_PAGE + "/blob/main/LICENSE.txt"
+LOCAL_MODEL_TERMS = "模型是腾讯混元的 Hy-MT3 1.8B，Apache-2.0 许可。从 Hugging Face 下载，WowType 不分发它。"
+# 上一代的默认模型（HY-MT 1.5 1.8B）：升级前下载过的照旧能用（核心 llama::LEGACY_MODEL_FILE 也认），
+# 设置里给「升级」，新的下好以后删掉它
+LEGACY_MODEL_FILE = "HY-MT1.5-1.8B-Q4_K_M.gguf"
+LEGACY_MODEL_NAME = "HY-MT 1.5"
 MODELS_DIR = os.path.join(DATA_DIR, "models")
 
 
@@ -3801,9 +3933,44 @@ TRANSLATE_ENGINES = [
 BILIBILI_PRIVACY = "要翻译的文字会发到哔哩哔哩的服务器（index-translate.bilibili.com）"
 
 
-def local_model_path(values):
+def local_model_dest(values, models_dir=None):
+    """模型下载到哪：设置里写了 TranslateLocalModel 就是那里，没写是 models/ 下现在这一代的文件。"""
     custom = values.get("TranslateLocalModel", "").strip()
-    return os.path.expanduser(custom) if custom else os.path.join(MODELS_DIR, LOCAL_MODEL_FILE)
+    return os.path.expanduser(custom) if custom else os.path.join(
+        models_dir or MODELS_DIR, LOCAL_MODEL_FILE)
+
+
+def legacy_model_path(values, models_dir=None):
+    """还在用上一代模型时它的位置：没自己写位置、新的没下载、models/ 里有上一代的文件。不是返回 None。"""
+    if values.get("TranslateLocalModel", "").strip():
+        return None
+    models_dir = models_dir or MODELS_DIR
+    legacy = os.path.join(models_dir, LEGACY_MODEL_FILE)
+    if os.path.isfile(legacy) and not os.path.isfile(os.path.join(models_dir, LOCAL_MODEL_FILE)):
+        return legacy
+    return None
+
+
+def local_model_path(values, models_dir=None):
+    """输入法现在会用的模型文件（和核心 LocalConfig::model_file 一样：新的不在、上一代的在就用上一代的）。"""
+    return legacy_model_path(values, models_dir) or local_model_dest(values, models_dir)
+
+
+def remove_legacy_model(models_dir=None):
+    """新模型下好以后删掉上一代的（连同没下完的 .part）。返回空出多少字节。"""
+    models_dir = models_dir or MODELS_DIR
+    if not os.path.isfile(os.path.join(models_dir, LOCAL_MODEL_FILE)):
+        return 0
+    freed = 0
+    for name in (LEGACY_MODEL_FILE, LEGACY_MODEL_FILE + ".part"):
+        path = os.path.join(models_dir, name)
+        try:
+            size = os.path.getsize(path)
+            os.unlink(path)
+            freed += size
+        except OSError:
+            pass
+    return freed
 
 
 # llama-server：系统里没有时从 llama.cpp 官方发布页下载（MIT 许可）。钉死一个构建和它的 SHA256，
@@ -3982,16 +4149,10 @@ def download_model(dest, url=None, sha256=None, progress=None, cancelled=None, t
     return dest
 
 
-def download_model_cli(accepted):
-    """命令行下载本地翻译模型；要先同意许可（--accept-license）。"""
+def download_model_cli():
+    """命令行下载本地翻译模型。Apache-2.0 许可，不用另外确认（以前的 --accept-license 还认，不起作用）。"""
     print(LOCAL_MODEL_TERMS)
-    print(f"协议全文：{LOCAL_MODEL_LICENSE}\n")
-    if not accepted:
-        if not sys.stdin.isatty():
-            print("加 --accept-license 表示接受上面的许可")
-            return 2
-        if input("接受这份许可并下载？[y/N] ").strip().lower() not in ("y", "yes"):
-            return 1
+    print(f"许可全文：{LOCAL_MODEL_LICENSE}\n")
     dest = os.path.join(MODELS_DIR, LOCAL_MODEL_FILE)
 
     def progress(done, total):
@@ -4003,6 +4164,8 @@ def download_model_cli(accepted):
         else:
             download_model(dest, progress=progress)
             print(f"\n模型好了：{dest}")
+        if freed := remove_legacy_model():
+            print(f"已删除上一代的 {LEGACY_MODEL_NAME}，空出 {human_size(freed)}")
         if server := find_llama_server(read_config().get("TranslateLlamaServer", "")):
             print(f"llama-server：{server}")
         elif llama_asset():
@@ -4410,6 +4573,27 @@ def download_self_test():
             assert not os.path.exists(dest) and os.path.exists(dest + ".part")
         assert local_model_path({"TranslateLocalModel": ""}).endswith(LOCAL_MODEL_FILE)
         assert local_model_path({"TranslateLocalModel": "~/x.gguf"}) == os.path.expanduser("~/x.gguf")
+        # 上一代模型：新的没下载时照旧用它，新的下好了删掉它；自己写了位置的不管
+        models = os.path.join(tmp, "generations")
+        os.makedirs(models)
+        new, old = os.path.join(models, LOCAL_MODEL_FILE), os.path.join(models, LEGACY_MODEL_FILE)
+        none, custom = {"TranslateLocalModel": ""}, {"TranslateLocalModel": "~/x.gguf"}
+        assert legacy_model_path(none, models) is None and local_model_path(none, models) == new
+        assert remove_legacy_model(models) == 0
+        with open(old, "wb") as f:
+            f.write(b"old!")
+        with open(old + ".part", "wb") as f:
+            f.write(b"x")
+        assert legacy_model_path(none, models) == old and local_model_path(none, models) == old
+        assert local_model_dest(none, models) == new, "升级下到新文件名"
+        assert legacy_model_path(custom, models) is None
+        assert local_model_path(custom, models) == os.path.expanduser("~/x.gguf")
+        assert remove_legacy_model(models) == 0 and os.path.isfile(old), "新的还没下好不删旧的"
+        with open(new, "wb") as f:
+            f.write(b"new")
+        assert legacy_model_path(none, models) is None and local_model_path(none, models) == new
+        assert remove_legacy_model(models) == 5
+        assert not os.path.exists(old) and not os.path.exists(old + ".part") and os.path.isfile(new)
     server.shutdown()
 
 
@@ -6278,6 +6462,11 @@ class SettingsWindow(Adw.ApplicationWindow):
         rare = self.make_switch("RareExtChars", "更多生僻字", "要装能显示它们的字体，比如 fonts-hanazono")
         self.add_info(rare, "候选里也列出极少用的生僻字。系统自带的字体一般显示不了，会是方块。")
         pinyin.add(rare)
+        inline_space = self.make_switch(
+            "InlineSpaceSeparator", "输入框里的拼音用空格分音节", "ni hao，不用 ni'hao；候选框里照旧")
+        self.add_info(inline_space, "网页里的代码块（比如 ChatGPT）会把 ' 当引号上色，边打边重画，"
+                                    "可能留下半截拼音。遇到这种情况时打开。")
+        pinyin.add(inline_space)
         auto_pair = self.make_switch("AutoPairPunct", "中文标点自动配对", "打（【《「“‘ 时自动补上右半边")
         self.add_info(auto_pair, "中文标点下打左括号、左引号，上屏成对的，光标放到中间；"
                                  "在里面打完再按右半边，跳过补好的那个，不会多出一个。"
@@ -6323,8 +6512,251 @@ class SettingsWindow(Adw.ApplicationWindow):
         auto_space.add_row(self.make_switch("AutoSpaceDigits", "汉字和数字之间", None))
         extras.add(auto_space)
         page.add(extras)
+        page.add(self.build_sync())
         self.show_scheme(self.values["InputScheme"])
         return page
+
+    # ---------------- 跨设备复制粘贴
+
+    def build_sync(self):
+        group = Adw.PreferencesGroup(title="跨设备复制粘贴")
+        group.set_header_suffix(self.info_button(
+            "一台电脑上复制的文字，在另一台装了 WowType 的电脑上直接粘贴：按 Ctrl+V，"
+            "或者打 v 再按空格，在「剪贴板」里选。只传文字（最多 16 KB），不传图片和文件。\n\n"
+            "没有账号，也不经过 WowType 的服务器。两台设备用 6 位配对码配一次对，之后的内容都在设备上加密，"
+            "只有配过对的设备解得开。\n\n"
+            "同一个局域网里设备之间直接传"
+            f"（防火墙要放行 {SYNC_PORT} 端口的 UDP 和 TCP）。"
+            "不在同一个局域网时，可以自己部署一个中转服务（Cloudflare Worker，免费套餐够用），"
+            "它只看得到密文。\n\n"
+            "注意：从密码管理器复制的密码也会被传过去，输入法分不出哪条是密码。",
+            [("怎么部署中转服务", SYNC_RELAY_GUIDE)]))
+        self.sync_switch = self.make_switch("ClipboardSync", "跨设备复制粘贴", None)
+        self.sync_switch.connect("notify::active", lambda *_a: self.refresh_sync())
+        group.add(self.sync_switch)
+
+        self.sync_pair_row = Adw.ActionRow(title="配对")
+        self.sync_host_button = Gtk.Button(label="显示配对码", valign=Gtk.Align.CENTER)
+        self.sync_host_button.connect("clicked", self.on_sync_host)
+        self.sync_pair_row.add_suffix(self.sync_host_button)
+        self.sync_unpair_button = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
+                                             tooltip_text="取消配对（这台设备不再收发）")
+        self.sync_unpair_button.add_css_class("flat")
+        self.sync_unpair_button.connect("clicked", self.on_sync_unpair)
+        self.sync_pair_row.add_suffix(self.sync_unpair_button)
+        group.add(self.sync_pair_row)
+
+        self.sync_code_row = EntryRow(title="输入另一台设备上显示的配对码", show_apply_button=False)
+        self.sync_code_row.set_input_purpose(Gtk.InputPurpose.DIGITS)
+        self.sync_code_row.connect("entry-activated", self.on_sync_join)
+        self.sync_join_button = Gtk.Button(label="配对", valign=Gtk.Align.CENTER)
+        self.sync_join_button.connect("clicked", lambda _b: self.on_sync_join(self.sync_code_row))
+        self.sync_code_row.add_suffix(self.sync_join_button)
+        group.add(self.sync_code_row)
+
+        more = Adw.ExpanderRow(title="更多选项")
+        more.add_row(self.make_switch("ClipboardSyncLan", "同一个局域网里直接传", None))
+        self.sync_relay_row = EntryRow(title="中转服务地址（https://…，不用就留空）",
+                                       show_apply_button=False)
+        self.sync_relay_row.set_text(self.values["ClipboardSyncRelayUrl"])
+        self.sync_relay_row.connect("changed", lambda row: self.set_value(
+            "ClipboardSyncRelayUrl", row.get_text().strip()))
+        more.add_row(self.sync_relay_row)
+        self.sync_token_row = PasswordEntryRow(title="中转服务的访问口令")
+        self.sync_token_row.set_text(read_translate_key(SYNC_RELAY_KEY_FILE))
+        self.sync_token_row.connect("changed", self.on_sync_token_changed)
+        more.add_row(self.sync_token_row)
+        self.sync_ping_row = Adw.ActionRow(title="测试中转服务")
+        self.sync_ping_button = Gtk.Button(label="测试", valign=Gtk.Align.CENTER)
+        self.sync_ping_button.connect("clicked", self.on_sync_ping)
+        self.sync_ping_row.add_suffix(self.sync_ping_button)
+        more.add_row(self.sync_ping_row)
+        name = EntryRow(title=f"这台设备的名字（留空是 {os.uname().nodename}）", show_apply_button=False)
+        name.set_text(self.values["ClipboardSyncDeviceName"])
+        name.connect("changed", lambda row: self.set_value(
+            "ClipboardSyncDeviceName", row.get_text().strip()))
+        more.add_row(name)
+        more.add_row(self.make_switch("ClipboardSyncPaste", "收到的放进系统剪贴板",
+                                      "关掉以后只出现在 v + 空格的「剪贴板」里"))
+        group.add(more)
+        self.sync_more = more
+        self.sync_host = None       # 正在显示配对码时的 wowtype-sync 进程
+        self.sync_host_info = None  # 它打出来的（配对码, 另一台可以直接连的地址）
+        self.sync_busy = False      # 正在加入 / 测试
+        self.sync_token_source = 0
+        self.refresh_sync()
+        return group
+
+    def refresh_sync(self, note=None):
+        """照现在的状态改「配对」那一行。note：正在显示的配对码之类，盖过平常的说明。"""
+        if not hasattr(self, "sync_pair_row"):
+            return
+        tool = sync_tool()
+        paired, names = sync_devices()
+        hosting = self.sync_host is not None
+        if note:
+            text = note
+        elif not tool:
+            text = "这个安装包里没有配对工具（wowtype-sync），更新 WowType 以后再试"
+        elif paired and names:
+            text = "已经和 " + "、".join(names) + " 配对"
+        elif paired:
+            text = "已经配对"
+        else:
+            text = "还没有配对：在一台设备上显示配对码，在另一台上输入"
+        self.sync_pair_row.set_subtitle(GLib.markup_escape_text(text))
+        self.sync_host_button.set_label("取消" if hosting else "显示配对码")
+        self.sync_host_button.set_sensitive(bool(tool) and not self.sync_busy)
+        self.sync_unpair_button.set_visible(paired and not hosting)
+        self.sync_code_row.set_sensitive(bool(tool) and not hosting and not self.sync_busy)
+        self.sync_ping_button.set_sensitive(bool(tool) and not self.sync_busy)
+
+    def on_sync_token_changed(self, _row):
+        if self.sync_token_source:
+            GLib.source_remove(self.sync_token_source)
+        self.sync_token_source = GLib.timeout_add(400, self.save_sync_token)
+
+    def save_sync_token(self):
+        self.sync_token_source = 0
+        try:
+            write_translate_key(self.sync_token_row.get_text(), SYNC_RELAY_KEY_FILE)
+        except OSError as e:
+            self.toast(f"访问口令保存失败：{e.strerror}")
+        else:
+            # 插件每次重新配置时读口令文件
+            self.fcitx.reload()
+        return GLib.SOURCE_REMOVE
+
+    def sync_flush(self):
+        """跑 wowtype-sync 之前：没存的访问口令先存上（它从文件里读）。"""
+        if self.sync_token_source:
+            GLib.source_remove(self.sync_token_source)
+            self.save_sync_token()
+
+    def on_sync_host(self, _button):
+        """「显示配对码」：起 wowtype-sync pair-host，它先打一行配对码，配上了再打一行结果。"""
+        if self.sync_host is not None:
+            # 「取消」：结束进程，读输出的线程会收尾
+            self.sync_host.terminate()
+            return
+        self.sync_flush()
+        try:
+            process = subprocess.Popen(sync_command("pair-host", self.values), stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+        except OSError as e:
+            self.toast(f"配对工具起不来：{e.strerror}")
+            return
+        self.sync_host = process
+        self.refresh_sync("正在准备配对码…")
+        log("跨设备复制粘贴：开始配对（显示配对码）")
+
+        def work():
+            output = []
+            for line in process.stdout:
+                output.append(line)
+                word, _, rest = line.strip().partition(" ")
+                if word == "code":
+                    code = rest.split()[0]
+                    self.sync_host_info = (code, (rest.split() + [""] * 3)[2])
+                    GLib.idle_add(self.refresh_sync,
+                                  f"配对码 {code[:3]} {code[3:]}：在另一台设备的 WowType 设置里输入，5 分钟内有效")
+            process.wait()
+            GLib.idle_add(self.sync_host_done, process, "".join(output))
+        threading.Thread(target=work, daemon=True).start()
+
+    def sync_host_done(self, process, output):
+        if self.sync_host is process:
+            self.sync_host = None
+            self.sync_host_info = None
+        ok, text = sync_result(output)
+        if ok:
+            log("跨设备复制粘贴：配对成功")
+            self.toast(f"已经和 {text} 配对")
+            self.fcitx.reload()
+        elif process.returncode is not None and process.returncode < 0:
+            log("跨设备复制粘贴：取消了配对")
+        else:
+            log(f"跨设备复制粘贴：没配上：{text}")
+            self.toast(text)
+        self.refresh_sync()
+
+    def sync_run(self, args, done):
+        """后台跑一条 wowtype-sync，跑完在主线程调 done(成没成, 说明)。"""
+        self.sync_flush()
+        self.sync_busy = True
+        self.refresh_sync()
+
+        def work():
+            try:
+                result = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
+                                        timeout=90)
+                outcome = sync_result(result.stdout)
+            except subprocess.TimeoutExpired:
+                outcome = (False, "等太久了，没有结果")
+            except OSError as e:
+                outcome = (False, f"配对工具起不来：{e.strerror}")
+
+            def finish():
+                self.sync_busy = False
+                done(*outcome)
+                self.refresh_sync()
+            GLib.idle_add(finish)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_sync_join(self, row):
+        code = "".join(ch for ch in row.get_text() if not ch.isspace() and ch != "-")
+        if not (len(code) == 6 and code.isascii() and code.isdigit()):
+            self.toast("配对码是 6 位数字")
+            return
+        self.refresh_sync("正在找另一台设备…")
+
+        def done(ok, text):
+            if ok:
+                log("跨设备复制粘贴：配对成功（输入配对码）")
+                row.set_text("")
+                self.toast(f"已经和 {text} 配对")
+                self.fcitx.reload()
+            else:
+                log(f"跨设备复制粘贴：没配上：{text}")
+                self.toast(text)
+        self.sync_run(sync_command("pair-join", self.values, code), done)
+
+    def on_sync_unpair(self, _button):
+        dialog = AlertDialog(
+            heading="取消配对？",
+            body="这台设备不再收到别的设备复制的内容，也不再把这里复制的发出去。"
+                 "别的设备之间不受影响；以后想恢复，重新配一次对就行。")
+        dialog.add_response("cancel", "不取消")
+        dialog.add_response("unpair", "取消配对")
+        dialog.set_response_appearance("unpair", ResponseAppearance.DESTRUCTIVE)
+
+        def answered(_dialog, response):
+            if response != "unpair":
+                return
+
+            def done(ok, text):
+                if ok:
+                    log("跨设备复制粘贴：取消了配对")
+                    self.toast("已取消配对")
+                    self.fcitx.reload()
+                else:
+                    self.toast(text)
+            self.sync_run([sync_tool(), "unpair", "--state", SYNC_STATE_FILE], done)
+        dialog.connect("response", answered)
+        dialog.present(self)
+
+    def on_sync_ping(self, _button):
+        relay = self.sync_relay_row.get_text().strip()
+        if not relay:
+            self.toast("先填中转服务的地址")
+            return
+        self.sync_ping_row.set_subtitle("正在连接…")
+
+        def done(ok, text):
+            self.sync_ping_row.set_subtitle(GLib.markup_escape_text(
+                "连得上，访问口令也对" if ok else text))
+        self.sync_run([sync_tool(), "ping", "--relay", relay,
+                       "--relay-key-file", SYNC_RELAY_KEY_FILE], done)
 
     def show_scheme(self, scheme):
         """双拼、五笔各自的设置只在选了它时显示；双拼、五笔时 v 是字母键：计算器换成大写 V，
@@ -6824,6 +7256,17 @@ class SettingsWindow(Adw.ApplicationWindow):
         self.switches["Voice"].bind_property("active", self.key_row, "sensitive",
                                              GObject.BindingFlags.SYNC_CREATE)
         group.add(self.key_row)
+
+        silence = voice_silence_options(self.values["VoiceSilenceTimeout"])
+        self.voice_silence_values = [value for _label, value in silence]
+        self.silence_row = Adw.ComboRow(title=VOICE_SILENCE_TITLE, subtitle=VOICE_SILENCE_INFO,
+                                        model=Gtk.StringList.new([label for label, _ in silence]))
+        self.silence_row.set_selected(self.voice_silence_values.index(self.values["VoiceSilenceTimeout"]))
+        self.silence_row.connect("notify::selected", lambda row, _p: self.set_value(
+            "VoiceSilenceTimeout", self.voice_silence_values[row.get_selected()]))
+        self.switches["Voice"].bind_property("active", self.silence_row, "sensitive",
+                                             GObject.BindingFlags.SYNC_CREATE)
+        group.add(self.silence_row)
         copy_row = self.make_switch("VoiceCopy", "同时复制到剪贴板", "要装 wl-clipboard 或 xclip")
         self.switches["Voice"].bind_property("active", copy_row, "sensitive",
                                              GObject.BindingFlags.SYNC_CREATE)
@@ -6968,6 +7411,11 @@ class SettingsWindow(Adw.ApplicationWindow):
         self.translate_row = self.make_switch("Translate", "互译", None)
         self.translate_row.connect("notify::active", self.on_translate_toggled)
         intro.add(self.translate_row)
+        self.one_shot_row = self.make_switch(
+            "TranslateOneShot", "双击 Shift 单次互译", "单按 Shift 只切中英，翻完一句自动回来")
+        self.add_info(self.one_shot_row, ONE_SHOT_INFO)
+        self.one_shot_row.connect("notify::active", lambda *_a: self.refresh_translate_status())
+        intro.add(self.one_shot_row)
         self.target_codes = [code for _, code, _ in TRANSLATE_LANGUAGES]
         self.target_row = Adw.ComboRow(
             title="翻译成", model=Gtk.StringList.new([label for label, _, _ in TRANSLATE_LANGUAGES]))
@@ -7103,7 +7551,7 @@ class SettingsWindow(Adw.ApplicationWindow):
     def build_local_translate(self):
         group = Adw.PreferencesGroup(title="离线翻译模型")
         group.set_header_suffix(self.info_button(
-            "腾讯混元的翻译模型 HY-MT。翻译时占 1.5 GB 左右内存，一会儿不用就自动释放。"
+            "腾讯混元的翻译模型 Hy-MT3。翻译时占 2 GB 左右内存，一会儿不用就自动释放。"
             "找不到 llama-server 时一起下载 llama.cpp 官方的（MIT 许可）。\n\n"
             + LOCAL_MODEL_TERMS, [("许可协议全文", LOCAL_MODEL_LICENSE)]))
         self.local_model_row = Adw.ActionRow(title="翻译模型")
@@ -7119,6 +7567,9 @@ class SettingsWindow(Adw.ApplicationWindow):
         group.add(self.local_model_row)
         self.local_cancel = None
         self.local_stage = "model"
+        # 新模型已经在了、上一代的还留着（上次升级到一半关了窗口）：补删，腾出 1 GB 多
+        if not self.values["TranslateLocalModel"] and (freed := remove_legacy_model()):
+            log(f"删掉上一代的本地翻译模型，空出 {human_size(freed)}")
 
         # 一般用不着的放进折叠项
         more = Adw.ExpanderRow(title="更多选项")
@@ -7148,11 +7599,13 @@ class SettingsWindow(Adw.ApplicationWindow):
         return os.path.isfile(local_model_path(self.values)) and bool(
             find_llama_server(self.values["TranslateLlamaServer"]))
 
-    def local_missing(self):
+    def local_missing(self, upgrade=False):
         """还差什么没下载：（要不要模型, 要不要 llama-server, 一共多少字节）。
 
-        llama-server 只在系统里没有、这台机器又有现成的官方包时才算。"""
-        want_model = not os.path.isfile(local_model_path(self.values))
+        llama-server 只在系统里没有、这台机器又有现成的官方包时才算。upgrade：还在用上一代模型时
+        把新模型也算进去（点「升级」时）。"""
+        want_model = not os.path.isfile(local_model_path(self.values)) or (
+            upgrade and bool(legacy_model_path(self.values)))
         asset = llama_asset()
         want_llama = bool(asset) and not find_llama_server(self.values["TranslateLlamaServer"])
         size = (LOCAL_MODEL_SIZE if want_model else 0) + (asset[1] if want_llama else 0)
@@ -7172,8 +7625,14 @@ class SettingsWindow(Adw.ApplicationWindow):
         server = find_llama_server(self.values["TranslateLlamaServer"])
         mine = downloaded_llama_server()
         want_model, want_llama, size = self.local_missing()
+        # 还在用上一代模型：能用，另给「升级」
+        legacy = bool(legacy_model_path(self.values))
         if downloading:
             pass  # 进度由下载线程更新
+        elif not want_model and server and legacy:
+            self.local_model_row.set_subtitle(GLib.markup_escape_text(
+                f"在用上一代的 {LEGACY_MODEL_NAME}（{human_size(os.path.getsize(path))}），"
+                f"可以升级到 Hy-MT3（{human_size(LOCAL_MODEL_SIZE)}）"))
         elif not want_model and server:
             self.local_model_row.set_subtitle(GLib.markup_escape_text(
                 f"已下载（{human_size(os.path.getsize(path))}）"))
@@ -7184,8 +7643,9 @@ class SettingsWindow(Adw.ApplicationWindow):
             self.local_model_row.set_subtitle("还差 llama.cpp，见「更多选项」")
         else:
             self.local_model_row.set_subtitle(GLib.markup_escape_text(f"要下载 {human_size(size)}"))
-        self.local_download.set_label("取消" if downloading else "下载")
-        self.local_download.set_visible(downloading or want_model or want_llama)
+        upgrade = legacy and not want_model and not want_llama
+        self.local_download.set_label("取消" if downloading else "升级" if upgrade else "下载")
+        self.local_download.set_visible(downloading or want_model or want_llama or legacy)
         self.local_delete.set_visible(
             not downloading and not self.values["TranslateLocalModel"]
             and (os.path.isfile(path) or bool(mine)))
@@ -7205,36 +7665,43 @@ class SettingsWindow(Adw.ApplicationWindow):
         if self.local_cancel is not None:
             self.local_cancel.set()
             return
+        # 模型能用、只差 llama-server 时先把它补上；都齐了、还在用上一代模型，点的就是「升级」
         want_model, want_llama, size = self.local_missing()
-        if not want_model or os.path.exists(local_model_path(self.values) + ".part"):
-            # 只差 llama-server，或者模型下到一半（开始下时已经同意过许可）：不用再确认，接着下（和 macOS 一样）
-            self.start_local_download()
+        upgrade = not want_model and not want_llama and bool(legacy_model_path(self.values))
+        if upgrade:
+            want_model, want_llama, size = self.local_missing(upgrade=True)
+        if not want_model or os.path.exists(local_model_dest(self.values) + ".part"):
+            # 只差 llama-server，或者模型下到一半（开始下时已经确认过）：不用再确认，接着下（和 macOS 一样）
+            self.start_local_download(upgrade)
             return
         extra = ("同时下载运行模型的程序 llama-server（llama.cpp 官方发布，MIT 许可）。"
                  if want_llama else "")
+        if upgrade:
+            extra = f"下好以后删掉上一代的 {LEGACY_MODEL_NAME}，下载期间照旧用它翻译。"
         dialog = AlertDialog(
-            heading="下载离线翻译模型？",
-            body=f"一共 {human_size(size)}，下载完会校验文件。{extra}\n\n"
-                 f"{LOCAL_MODEL_TERMS}\n\n点「同意并下载」表示你接受这份许可。")
+            heading="升级离线翻译模型？" if upgrade else "下载离线翻译模型？",
+            body=f"一共 {human_size(size)}，下载完会校验文件。{extra}\n\n{LOCAL_MODEL_TERMS}")
         dialog.add_response("cancel", "取消")
-        dialog.add_response("accept", "同意并下载")
+        dialog.add_response("accept", "升级" if upgrade else "下载")
         dialog.set_response_appearance("accept", ResponseAppearance.SUGGESTED)
 
         def answered(_dialog, response):
             if response == "accept":
-                self.start_local_download()
+                self.start_local_download(upgrade)
         dialog.connect("response", answered)
         dialog.present(self)
 
-    def start_local_download(self):
+    def start_local_download(self, upgrade=False):
         """把还差的都下了：模型，和系统里没有时的 llama-server。进度都显示在「翻译模型」那一行。
 
         模型下到现在用的位置：设置里写了 TranslateLocalModel 就下到那里，没写下到 models/（和 macOS 一样），
-        下完就能用，不会出现下好了却还显示缺模型。"""
-        dest = local_model_path(self.values)
-        want_model, want_llama, _size = self.local_missing()
+        下完就能用，不会出现下好了却还显示缺模型。upgrade：还在用上一代模型，把新的下到 models/，
+        校验过了再删旧的。"""
+        dest = local_model_dest(self.values)
+        want_model, want_llama, _size = self.local_missing(upgrade)
         if self.local_cancel is not None or not (want_model or want_llama):
             return
+        default_place = not self.values["TranslateLocalModel"]
         cancel = threading.Event()
         self.local_cancel = cancel
         self.local_model_row.set_subtitle("正在连接…")
@@ -7254,6 +7721,8 @@ class SettingsWindow(Adw.ApplicationWindow):
             try:
                 if want_model:
                     download_model(dest, progress=progress_of("模型"), cancelled=cancel.is_set)
+                    if default_place:
+                        remove_legacy_model()
                 if want_llama:
                     install_llama_server(progress=progress_of("运行程序"), cancelled=cancel.is_set)
             except DownloadCancelled:
@@ -7283,6 +7752,11 @@ class SettingsWindow(Adw.ApplicationWindow):
         try:
             if freed:
                 os.unlink(path)
+            # 升级下到一半的也一起删
+            part = local_model_dest(self.values) + ".part"
+            if os.path.isfile(part):
+                freed += os.path.getsize(part)
+                os.unlink(part)
         except OSError as e:
             self.toast(f"删不掉：{e.strerror}")
         else:
@@ -7449,7 +7923,8 @@ class SettingsWindow(Adw.ApplicationWindow):
                 "先在下面下载翻译模型" if self.values.get("TranslateLocal") == "True"
                 else "先在下面填好翻译服务")
         elif key:
-            self.translate_row.set_subtitle(f"按 {key_label(key)} 进出「译」")
+            self.translate_row.set_subtitle(f"按 {key_label(key)} 进出「译」" + (
+                "，双击 Shift 也行" if self.values.get("TranslateOneShot") == "True" and toggle != "Off" else ""))
         elif held:
             # 设了互译键，单按 Shift 就不进「译」了；键又被 fcitx5 拿走，哪个都进不去
             self.translate_row.set_subtitle(f"互译的快捷键 {key_label(held)} 被 fcitx5 占着，先在 Fcitx 5 配置里删掉它")
@@ -7460,6 +7935,8 @@ class SettingsWindow(Adw.ApplicationWindow):
             self.translate_row.set_subtitle(
                 f"{taken} 被 fcitx5 占着；" + (f"用{'、'.join(usable)}，" if usable else "")
                 + "或到「输入」页让给 WowType")
+        elif self.values.get("TranslateOneShot") == "True":
+            self.translate_row.set_subtitle("双击 Shift 翻一句，单按只切中英")
         else:
             self.translate_row.set_subtitle("单按 Shift：中 → 英 → 译 → 中")
 
@@ -8124,7 +8601,7 @@ if __name__ == "__main__":
             print(f"已保存到 {export_diagnostics(os.path.abspath(target))}")
         sys.exit(0)
     if "--download-model" in sys.argv:
-        sys.exit(download_model_cli("--accept-license" in sys.argv))
+        sys.exit(download_model_cli())
     for flag in ("--install-voice-model", "--remove-voice-model"):
         if flag in sys.argv:
             at = sys.argv.index(flag)
@@ -8158,6 +8635,7 @@ if __name__ == "__main__":
         setup_self_test()
         lexicon_update_self_test()
         voice_model_self_test()
+        sync_self_test()
         lexicon_self_test()
         stale_copy_self_test()
         stats_self_test()

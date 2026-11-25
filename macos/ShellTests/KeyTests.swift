@@ -328,6 +328,42 @@ func runKeyTests() {
         check(!texts.contains("中"), "没开模糊音时 zheng 这一页没有中", "\(texts)")
     }
 
+    // #229：候选上点右键，学过的词出菜单「忘掉这个词」（⌃⌫），点了和 Control+Delete 一样忘掉、重画
+    do {
+        let (c, f) = session()
+        type(c, "ma")
+        let word = texts.count > 2 ? texts[2] : ""
+        for _ in 0..<3 {
+            press(c, .escape)
+            type(c, "ma")
+            if let at = texts.firstIndex(of: word) {
+                press(c, .char(Character(String(at + 1))))
+            }
+        }
+        press(c, .escape)
+        type(c, "ma")
+        let at = texts.firstIndex(of: word)
+        let menu = at.flatMap { state.candidatePanel.forgetMenu(forCandidate: $0) }
+        let item = menu?.items.first
+        check(menu?.items.count == 1 && item?.title == "忘掉这个词" && item?.keyEquivalent == "\u{8}"
+              && item?.keyEquivalentModifierMask == .control,
+              "选过的 \(word) 右键有「忘掉这个词」（⌃⌫）", "\(String(describing: menu?.items))")
+        let unlearned = texts.indices.first { state.candidatePanel.forgetMenu(forCandidate: $0) == nil }
+        check(unlearned != nil, "没学过的词右键不出菜单", "\(texts)")
+        let cursor = current
+        let marked = f.markedText
+        let inserted = f.inserted.count
+        if let item, let action = item.action {
+            NSApp.sendAction(action, to: item.target, from: item)
+        }
+        check(f.inserted.count == inserted && f.markedText == marked && current == cursor,
+              "点了「忘掉这个词」：编辑区、光标不动", "\(f.markedText) \(String(describing: current))")
+        let again = texts.firstIndex(of: word)
+        check(again.map { state.candidatePanel.forgetMenu(forCandidate: $0) == nil } ?? true,
+              "忘掉以后 \(word) 右键不再出菜单", "\(texts)")
+        press(c, .escape)
+    }
+
     commitCompositionTests()
     contextTests()
     panelDrawingTests()

@@ -10,6 +10,7 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -61,6 +62,13 @@ private:
 };
 
 Clipboard *fakeClipboard = nullptr;
+
+/// 用系统装的 clipboard 插件（WOWTYPE_HARNESS_REAL_CLIPBOARD=1）。addon-test.sh 没给时传的是空串，
+/// 空串也算没给——以前只看有没有这个变量，假剪贴板那些用例一直没跑到。
+bool realClipboard() {
+    const char *value = std::getenv("WOWTYPE_HARNESS_REAL_CLIPBOARD");
+    return value && *value;
+}
 
 class FakeClipboardFactory final : public AddonFactory {
 public:
@@ -349,6 +357,89 @@ void runCases(Instance &instance) {
     }
     fresh(ic.get());
     check(!send(ic.get(), Key(FcitxKey_Delete, KeyState::Ctrl)), "没在打字时 Ctrl+Delete 交给应用");
+
+#ifdef WOWTYPE_HAVE_CANDIDATE_ACTIONS
+    // 候选上点右键的「忘掉这个词」（#229）：经典界面拿 ActionableCandidateList 画菜单。学过的词才有这一项，
+    // 点了和 Ctrl+Delete 一样忘掉、马上存 user.tsv，候选框重画，编辑区和光标不动
+    fresh(ic.get());
+    type(ic.get(), "pa");
+    {
+        const auto before = page(ic.get());
+        const std::string word = before.size() > 2 ? before[2] : "";
+        for (int i = 0; i < 3 && !word.empty(); ++i) {
+            fresh(ic.get());
+            type(ic.get(), "pa");
+            const auto now = page(ic.get());
+            const auto it = std::find(now.begin(), now.end(), word);
+            if (it == now.end()) {
+                break;
+            }
+            type(ic.get(), std::to_string(it - now.begin() + 1));
+        }
+        fresh(ic.get());
+        type(ic.get(), "pa");
+        auto list = ic->inputPanel().candidateList();
+        auto *actions = list ? list->toActionable() : nullptr;
+        check(actions != nullptr, "普通候选框带右键菜单（ActionableCandidateList）");
+        const auto learned = page(ic.get());
+        const auto at = std::find(learned.begin(), learned.end(), word);
+        check(!word.empty() && at != learned.end(), "pa 选了三次的 " + word + " 在第一页：" + join(learned));
+        if (actions && at != learned.end()) {
+            const int idx = static_cast<int>(at - learned.begin());
+            const auto &candidate = list->candidate(idx);
+            const auto menu = actions->candidateActions(candidate);
+            check(actions->hasAction(candidate) && menu.size() == 1 && menu[0].text() == "忘掉这个词",
+                  "学过的 " + word + " 右键有「忘掉这个词」");
+            bool someWithout = false;
+            for (int i = 0; i < list->size(); ++i) {
+                if (!actions->hasAction(list->candidate(i))) {
+                    someWithout = true;
+                    check(actions->candidateActions(list->candidate(i)).empty(),
+                          "没学过的 " + list->candidate(i).text().toString() + " 菜单是空的");
+                    break;
+                }
+            }
+            check(someWithout, "没学过的词不给「忘掉这个词」：" + join(learned));
+            const int cursor = list->cursorIndex();
+            const char *dictPath = std::getenv("WOWTYPE_USER_DICT");
+            std::error_code ec;
+            if (dictPath) {
+                std::filesystem::remove(dictPath, ec);
+            }
+            actions->triggerAction(candidate, menu.empty() ? 1 : menu[0].id());
+            auto redrawn = ic->inputPanel().candidateList();
+            const auto after = page(ic.get());
+            check(redrawn && redrawn != list && preedit(ic.get()) == "pa" && ic->committed.empty() &&
+                      !after.empty() && redrawn->cursorIndex() == cursor,
+                  "点了「忘掉这个词」候选框重画，编辑区和光标不动：" + preedit(ic.get()) + " / " + join(after));
+            const auto again = std::find(after.begin(), after.end(), word);
+            auto *redrawnActions = redrawn ? redrawn->toActionable() : nullptr;
+            const bool stillForgettable =
+                again != after.end() &&
+                (!redrawnActions ||
+                 redrawnActions->hasAction(redrawn->candidate(static_cast<int>(again - after.begin()))));
+            check(!stillForgettable, "忘掉以后 " + word + " 不再有「忘掉这个词」");
+            for (int i = 0; dictPath && i < 300 && !std::filesystem::exists(dictPath, ec); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            std::ifstream in(dictPath ? dictPath : "");
+            const std::string dict((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            check(dictPath && in.is_open() && dict.find("\t" + word + "\t") == std::string::npos,
+                  "右键忘掉以后马上存了 user.tsv，里面没有 " + word + "：" + dict);
+            // 已经换下来的旧列表再点一次：不是输入框现在的列表，什么也不做
+            actions->triggerAction(candidate, menu.empty() ? 1 : menu[0].id());
+            check(ic->inputPanel().candidateList() == redrawn, "过时的列表点了不算");
+        }
+        // 展开面板（一行好几个词）不给右键菜单：说不清忘的是哪个
+        type(ic.get(), "<down>");
+        auto grid = ic->inputPanel().candidateList();
+        check(grid && grid != list && grid->toActionable() == nullptr, "展开面板的行没有右键菜单");
+        type(ic.get(), "<esc>"); // 展开面板里的 Esc 只收起，后面的 fresh 再清空
+    }
+#else
+    std::printf("skip 候选右键菜单：fcitx5 %s 没有 ActionableCandidateList（5.1.10 起）\n",
+                std::string(Instance::version()).c_str());
+#endif
 
     // 打字途中会话不管的键（小键盘的 + - * / .、F 键、Insert、不是 ASCII 的键……）都吃掉：
     // 交给应用的话，小键盘的 + 先到应用、上屏后成了「+你好」，F5 把网页刷新掉
@@ -1088,6 +1179,34 @@ void runCases(Instance &instance) {
         ic->reset();
         check(ic->committed.empty() && client().toString().empty(),
               "应用跟着重置输入框：丢掉，不留 ni'hao，实际 " + ic->committed);
+        // InlineSpaceSeparator：输入框里音节用空格分（#247：网页代码块的语法高亮把 '…' 当字符串，
+        // 打字时重画、留下半截拼音）。默认关，上面都是 '
+        const std::string confDir = std::string(std::getenv("XDG_CONFIG_HOME")) + "/fcitx5/conf";
+        std::filesystem::create_directories(confDir);
+        auto *wowtype = instance.addonManager().addon("wowtype");
+        std::ofstream(confDir + "/wowtype.conf") << "InlineSpaceSeparator=True\n";
+        wowtype->reloadConfig();
+        fresh(ic.get());
+        type(ic.get(), "nihao");
+        check(client().toString() == "ni hao" && client().cursor() == static_cast<int>(std::string("ni hao").size()),
+              "打开 InlineSpaceSeparator：输入框里是 ni hao、光标在末尾：" + client().toString());
+        fresh(ic.get());
+        type(ic.get(), "nihaozhongguo");
+        const auto picks = page(ic.get());
+        const auto hit = std::find(picks.begin(), picks.end(), "你好");
+        if (hit != picks.end() && hit - picks.begin() < 9) {
+            type(ic.get(), std::to_string(hit - picks.begin() + 1));
+        }
+        check(client().toString() == "你好zhong guo", "选了一半的句子：" + client().toString());
+        fresh(ic.get());
+        type(ic.get(), "xi'an");
+        check(client().toString() == "xi an" && preedit(ic.get()).empty(),
+              "手动分隔的 xi'an 在输入框里是 xi an：" + client().toString());
+        fresh(ic.get());
+        std::ofstream(confDir + "/wowtype.conf") << "";
+        wowtype->reloadConfig();
+        type(ic.get(), "nihao");
+        check(client().toString() == "ni'hao", "关掉以后回到 ni'hao：" + client().toString());
         fresh(ic.get());
     }
     ic->setCapabilityFlags(CapabilityFlags{});
@@ -1383,7 +1502,7 @@ void runCases(Instance &instance) {
           "常用语按文件顺序：" + join(page(ic.get())));
     type(ic.get(), "2");
     check(ic->committed == "我的邮箱" && page(ic.get()).empty(), "数字键选常用语：" + ic->committed);
-    if (std::getenv("WOWTYPE_HARNESS_REAL_CLIPBOARD")) {
+    if (realClipboard()) {
         // 系统装的 clipboard 插件（没有显示器，历史是空的）：只确认调用它不出错
         fresh(ic.get());
         type(ic.get(), "v<sp>1");
@@ -3053,6 +3172,98 @@ void runTranslateCase(Instance &instance, std::function<void()> done) {
     s.push_back({"#253：再单按一下，定时器里切回中文",
                  [](HarnessInputContext *ic) { tapKey(ic, FcitxKey_Shift_R); },
                  [label](HarnessInputContext *ic) { return label(ic) == "中"; }});
+    // #191：互译只翻一句（TranslateOneShot）。双击判断开着（上面 #253 的几步打开的），单按要等定时器切
+    auto oneShotConfig = [c, addon, url](bool on) {
+        std::ofstream(c->configFile) << "Translate=True\nTranslateBaseUrl=" << url
+                                     << "\nTranslateModel=mock\nTranslateTarget=en\nTranslateOneShot="
+                                     << (on ? "True" : "False") << "\n";
+        addon->reloadConfig();
+    };
+    s.push_back({"#191：开着单次互译，双击 Shift 进「译」，打的字攒在原文框里",
+                 [reset, oneShotConfig, label, tappedLabel](HarnessInputContext *ic) {
+                     oneShotConfig(true);
+                     reset(ic);
+                     tapKey(ic, FcitxKey_Shift_R);
+                     *tappedLabel = label(ic);
+                     tapKey(ic, FcitxKey_Shift_R);
+                     check(*tappedLabel == "中" && label(ic) == "译",
+                           "#191：第一下先等着，第二下进「译」：" + *tappedLabel + " " + label(ic));
+                     type(ic, "zhongguo<sp>");
+                 },
+                 [label](HarnessInputContext *ic) {
+                     return ic->committed.empty() && !preedit(ic).empty() && label(ic) == "译" &&
+                            aux(ic).find("中→英") != std::string::npos;
+                 }});
+    s.push_back({"#191：没译好就按回车：译好了自动上屏，定时器里回到中文",
+                 [source](HarnessInputContext *ic) {
+                     *source = preedit(ic);
+                     type(ic, "<cr>");
+                 },
+                 [source, label](HarnessInputContext *ic) {
+                     return ic->committed == "EN:" + *source && label(ic) == "中" && preedit(ic).empty() &&
+                            inlineText(ic).empty();
+                 }});
+    s.push_back({"#191：单次互译开着，单按 Shift 只切中英（先到英文）",
+                 [reset](HarnessInputContext *ic) {
+                     reset(ic);
+                     tapKey(ic, FcitxKey_Shift_R);
+                 },
+                 [label](HarnessInputContext *ic) { return label(ic) == "英"; }});
+    s.push_back({"#191：英文里双击进「译」，等译文出来",
+                 [label](HarnessInputContext *ic) {
+                     tapKey(ic, FcitxKey_Shift_R);
+                     tapKey(ic, FcitxKey_Shift_R);
+                     check(label(ic) == "译", "#191：英文里双击进「译」：" + label(ic));
+                     type(ic, "nihao<sp>");
+                 },
+                 [label](HarnessInputContext *ic) { return inlineText(ic) == "EN:你好" && label(ic) == "译"; }});
+    s.push_back({"#191：回车上屏译文，回到英文",
+                 [](HarnessInputContext *ic) { type(ic, "<cr>"); },
+                 [label](HarnessInputContext *ic) {
+                     return ic->committed == "EN:你好" && label(ic) == "英" && preedit(ic).empty() &&
+                            inlineText(ic).empty();
+                 }});
+    s.push_back({"#191：Esc 放弃：不上屏，回到英文",
+                 [reset, label](HarnessInputContext *ic) {
+                     reset(ic);
+                     tapKey(ic, FcitxKey_Shift_R);
+                     tapKey(ic, FcitxKey_Shift_R);
+                     type(ic, "nihao<sp>");
+                     check(label(ic) == "译", "#191：又双击进「译」：" + label(ic));
+                     type(ic, "<esc>");
+                 },
+                 [label](HarnessInputContext *ic) {
+                     return ic->committed.empty() && label(ic) == "英" && preedit(ic).empty() &&
+                            inlineText(ic).empty() && page(ic).empty();
+                 }});
+    s.push_back({"#191：再单按一下回中文",
+                 [](HarnessInputContext *ic) { tapKey(ic, FcitxKey_Shift_R); },
+                 [label](HarnessInputContext *ic) { return label(ic) == "中"; }});
+    s.push_back({"#191：拼音打到一半双击：拼音带进「译」接着打，什么都不上屏",
+                 [label](HarnessInputContext *ic) {
+                     type(ic, "ni");
+                     tapKey(ic, FcitxKey_Shift_R);
+                     tapKey(ic, FcitxKey_Shift_R);
+                     check(label(ic) == "译" && ic->committed.empty(), "#191：打到一半双击进「译」：" + label(ic));
+                     type(ic, "hao<sp>");
+                 },
+                 [label](HarnessInputContext *ic) {
+                     return ic->committed.empty() && preedit(ic) == "你好" && label(ic) == "译";
+                 }});
+    s.push_back({"#191：「译」里单按 Shift 放弃：原文原样上屏，回到中文",
+                 [](HarnessInputContext *ic) { tapKey(ic, FcitxKey_Shift_R); },
+                 [label](HarnessInputContext *ic) { return ic->committed == "你好" && label(ic) == "中"; }});
+    s.push_back({"#191：关着单次互译：双击 Shift 照旧不切，过了间隔也不切",
+                 [reset, oneShotConfig, waitedFrom](HarnessInputContext *ic) {
+                     oneShotConfig(false);
+                     reset(ic);
+                     tapKey(ic, FcitxKey_Shift_R);
+                     tapKey(ic, FcitxKey_Shift_R);
+                     *waitedFrom = now(CLOCK_MONOTONIC);
+                 },
+                 [label, waitedFrom](HarnessInputContext *ic) {
+                     return now(CLOCK_MONOTONIC) - *waitedFrom > 700000 && label(ic) == "中";
+                 }});
     s.push_back({"#253：测完关掉双击判断（别的用例连按不等）",
                  [addon, reset](HarnessInputContext *ic) {
                      ::setenv("WOWTYPE_SHIFT_DOUBLE_TAP", "0", 1);
@@ -3259,6 +3470,150 @@ void runVoiceCase(Instance &instance, std::function<void()> done) {
         });
 }
 
+/// 跨设备复制粘贴：这里的输入法是一台设备，addon-test.sh 用 `wowtype-sync listen` 起了另一台
+/// （同一组，收到什么写进 WOWTYPE_HARNESS_SYNC_PEER_OUT），第三台用 `wowtype-sync send` 往这边送。
+/// 每格 0.1 秒，靠事件循环里的定时器推进（输入法每秒采一次剪贴板）。
+struct SyncCase {
+    Instance &instance;
+    std::unique_ptr<HarnessInputContext> ic;
+    std::unique_ptr<EventSourceTime> timer;
+    std::string peerOut;
+    std::string sendCommand;
+    int stage = 0;
+    int ticks = 0;
+};
+
+std::string readFile(const std::string &path) {
+    std::ifstream in(path);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+void runSyncCase(Instance &instance, std::function<void()> done) {
+    const char *peerOut = std::getenv("WOWTYPE_HARNESS_SYNC_PEER_OUT");
+    const char *sendCommand = std::getenv("WOWTYPE_HARNESS_SYNC_SEND");
+    if (!peerOut || !*peerOut || !sendCommand || !*sendCommand || !fakeClipboard) {
+        std::printf("skip 跨设备复制粘贴（addon-test.sh 没起另一台设备：out=%d send=%d 假剪贴板=%d）\n",
+                    peerOut && *peerOut, sendCommand && *sendCommand, fakeClipboard != nullptr);
+        done();
+        return;
+    }
+    auto *c = new SyncCase{instance, std::make_unique<HarnessInputContext>(instance.inputContextManager()),
+                           {}, peerOut, sendCommand};
+    const std::string confDir = std::string(std::getenv("XDG_CONFIG_HOME")) + "/fcitx5/conf";
+    std::filesystem::create_directories(confDir);
+    auto *addon = instance.addonManager().addon("wowtype");
+    // 打开同步以前剪贴板里就有东西：不该发出去
+    setClipboard("打开同步以前就在剪贴板里的");
+    // 收到的不往系统剪贴板放（测试里没有、也不该碰真的剪贴板）
+    std::ofstream(confDir + "/wowtype.conf") << "ClipboardSync=True\nClipboardSyncPaste=False\n";
+    addon->reloadConfig();
+    c->ic->focusIn();
+    instance.setCurrentInputMethod(c->ic.get(), "wowtype", true);
+    c->timer = instance.eventLoop().addTimeEvent(
+        CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + 100000, 0,
+        [c, done, addon, confDir](EventSourceTime *source, uint64_t) {
+            ++c->ticks;
+            const std::string received = readFile(c->peerOut);
+            bool finished = false;
+            switch (c->stage) {
+            case 0:
+                // 等两边互相发现、输入法采到基准（每秒采一次）
+                if (c->ticks >= 30) {
+                    check(received.find("recv ") == std::string::npos,
+                          "跨设备：打开同步时剪贴板里原有的不发：" + received);
+                    setClipboard("从这台复制的\n第二行");
+                    c->stage = 1;
+                    c->ticks = 0;
+                }
+                break;
+            case 1:
+                if (received.find("从这台复制的\\n第二行") != std::string::npos || c->ticks > 150) {
+                    check(received.find("\t从这台复制的\\n第二行\n") != std::string::npos,
+                          "跨设备：这台复制的到了另一台：" + received);
+                    check(received.find("原有的") == std::string::npos, "跨设备：原有的一直没发");
+                    check(std::system(c->sendCommand.c_str()) == 0, "跨设备：第三台送得进来");
+                    c->stage = 2;
+                    c->ticks = 0;
+                }
+                break;
+            case 2: {
+                // 另一台复制的：在工具栏的「剪贴板」里（没开剪贴板历史，所以只有收到的这一条）
+                fresh(c->ic.get());
+                type(c->ic.get(), "v<sp>1");
+                const auto items = page(c->ic.get());
+                if (!items.empty() || c->ticks > 150) {
+                    check(items.size() == 1 && items[0] == "第三台复制的\u23CE换行",
+                          "跨设备：别的设备复制的出现在剪贴板里：" + join(items));
+                    type(c->ic.get(), "<cr>");
+                    check(c->ic->committed == "第三台复制的\n换行",
+                          "跨设备：选它上屏，换行原样：" + c->ic->committed);
+                    // 收到的被放进系统剪贴板、又当成本机复制的采回来：不往回发
+                    setClipboard("第三台复制的\n换行");
+                    c->stage = 3;
+                    c->ticks = 0;
+                } else {
+                    type(c->ic.get(), "<esc>");
+                }
+                break;
+            }
+            case 3:
+                if (c->ticks >= 25) {
+                    check(received.find("第三台复制的") == std::string::npos,
+                          "跨设备：别的设备传来的不往回发：" + received);
+                    // 关掉以后复制的不发
+                    std::ofstream(confDir + "/wowtype.conf") << "";
+                    addon->reloadConfig();
+                    setClipboard("关掉以后复制的");
+                    c->stage = 4;
+                    c->ticks = 0;
+                }
+                break;
+            case 4:
+                if (c->ticks >= 25) {
+                    check(received.find("关掉以后复制的") == std::string::npos,
+                          "跨设备：关掉以后不发：" + received);
+                    fresh(c->ic.get());
+                    type(c->ic.get(), "v<sp>1");
+                    check(page(c->ic.get()).empty(), "跨设备：关掉以后收到的也清掉：" + join(page(c->ic.get())));
+                    type(c->ic.get(), "<esc>");
+                    // 刚开机、还没复制过东西（剪贴板是空的）时打开：之后第一次复制的要发得出去
+                    setClipboard("");
+                    std::ofstream(confDir + "/wowtype.conf") << "ClipboardSync=True\nClipboardSyncPaste=False\n";
+                    addon->reloadConfig();
+                    c->stage = 5;
+                    c->ticks = 0;
+                }
+                break;
+            case 5:
+                if (c->ticks >= 30) {
+                    setClipboard("开机后第一次复制的");
+                    c->stage = 6;
+                    c->ticks = 0;
+                }
+                break;
+            default:
+                if (received.find("开机后第一次复制的") != std::string::npos || c->ticks > 150) {
+                    check(received.find("\t开机后第一次复制的\n") != std::string::npos,
+                          "跨设备：剪贴板原来是空的，第一次复制的也发：" + received);
+                    std::ofstream(confDir + "/wowtype.conf") << "";
+                    addon->reloadConfig();
+                    finished = true;
+                }
+                break;
+            }
+            if (!finished) {
+                source->setNextInterval(100000);
+                source->setOneShot();
+                return true;
+            }
+            setClipboard("");
+            c->ic.reset();
+            done();
+            dispatcher->schedule([c]() { delete c; });
+            return true;
+        });
+}
+
 /// 语音取消：按时间表（每格 0.1 秒）发按键、失焦，最后检查没有东西上屏。
 /// 识别是异步的，取消之后还要再等几秒，确认迟到的结果被丢掉、不会上屏。
 struct VoiceScript {
@@ -3390,6 +3745,287 @@ void runVoiceNoModelCase(Instance &instance, std::function<void()> done) {
          }},
     };
     runVoiceScript(instance, "语音·没有模型", steps, done);
+}
+
+/// 展开面板的网格（#270）：在会话总线上假装是 GNOME 扩展，收插件发的 Show / Hide。
+/// 回执时 kimpanel 拿到空列表、格子和光标发给扩展、点格子选词；不回执（或扩展不在）时照旧把网格拼成几行给 kimpanel。
+struct FakeGrid {
+    std::unique_ptr<dbus::Bus> bus;
+    std::unique_ptr<dbus::Slot> show;
+    std::unique_ptr<dbus::Slot> hide;
+    bool ack = true;
+    int shows = 0;
+    int hides = 0;
+    bool visible = false;
+    uint32_t serial = 0, first = 0, cursor = 0, cols = 0, page = 0, pages = 0;
+    std::vector<std::string> cells;
+    /// 每格能不能「忘掉这个词」（#229，Show 末尾的 ay）
+    std::vector<uint8_t> forgettable;
+    std::string header;
+    std::string addon;
+
+    void send(const char *signal, uint32_t a, std::optional<uint32_t> b = std::nullopt) {
+        auto msg = bus->createSignal("/io/github/gloridust/WowType", "io.github.gloridust.WowType.Grid1", signal);
+        msg.setDestination(addon);
+        msg << a;
+        if (b) {
+            msg << *b;
+        }
+        msg.send();
+    }
+
+    /// 点了翻页按钮（#296）：方向是有符号的，-1 上一屏、+1 下一屏。
+    void sendPage(uint32_t serial, int32_t delta) {
+        auto msg = bus->createSignal("/io/github/gloridust/WowType", "io.github.gloridust.WowType.Grid1", "Page");
+        msg.setDestination(addon);
+        msg << serial << delta;
+        msg.send();
+    }
+};
+
+void runGridOverlayCase(Instance &instance, std::function<void()> done) {
+    const char *address = std::getenv("DBUS_SESSION_BUS_ADDRESS");
+    if (!address || !*address) {
+        std::printf("skip 展开面板的网格（没有会话总线）\n");
+        done();
+        return;
+    }
+    static constexpr char kService[] = "io.github.gloridust.WowType.CandidateGrid";
+    static constexpr char kPath[] = "/io/github/gloridust/WowType";
+    static constexpr char kInterface[] = "io.github.gloridust.WowType.Grid1";
+    auto grid = std::make_shared<FakeGrid>();
+    grid->bus = std::make_unique<dbus::Bus>(dbus::BusType::Session);
+    grid->bus->attachEventLoop(&instance.eventLoop());
+    FakeGrid *fake = grid.get();
+    grid->show = grid->bus->addMatch(
+        dbus::MatchRule("", kPath, kInterface, "Show"), [fake](dbus::Message &msg) {
+            int32_t x = 0, y = 0, w = 0, h = 0;
+            bool relative = false;
+            double scale = 1.0;
+            // fcitx5 5.0 的 Message >> vector 不先清空，每一屏都接在后面
+            fake->cells.clear();
+            fake->forgettable.clear();
+            msg >> fake->serial >> fake->cells >> fake->first >> fake->cursor >> fake->cols >> fake->page >>
+                fake->pages >> fake->header >> x >> y >> w >> h >> relative >> scale >> fake->forgettable;
+            fake->addon = msg.sender();
+            ++fake->shows;
+            fake->visible = true;
+            if (fake->ack) {
+                fake->send("Ack", fake->serial);
+            }
+            return true;
+        });
+    grid->hide = grid->bus->addMatch(dbus::MatchRule("", kPath, kInterface, "Hide"),
+                                     [fake](dbus::Message &) {
+                                         ++fake->hides;
+                                         fake->visible = false;
+                                         return true;
+                                     });
+    check(grid->bus->requestName(kService, Flags<dbus::RequestNameFlag>{}), "展开面板的网格：假扩展占上名字");
+    auto listSize = [](VoiceScript &s) {
+        auto list = s.ic->inputPanel().candidateList();
+        return list ? list->size() : -1;
+    };
+    // 输入框上是不是 kimpanel 能画的旧网格（拼成几行、光标处的词用【】框起来）
+    auto framedRows = [](VoiceScript &s) {
+        for (const auto &row : page(s.ic.get())) {
+            if (row.find("【") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto firstPage = std::make_shared<std::vector<std::string>>();
+
+    using Steps = std::vector<std::pair<int, std::function<void(VoiceScript &)>>>;
+    Steps steps{
+        // 等插件看到扩展上线
+        {3, [firstPage, listSize](VoiceScript &s) {
+             fresh(s.ic.get());
+             type(s.ic.get(), "shi");
+             *firstPage = page(s.ic.get());
+             type(s.ic.get(), "<down>");
+             check(listSize(s) == 0, s.name + "：展开后 kimpanel 拿到空列表，实际 " +
+                                         std::to_string(listSize(s)) + " 项");
+             check(s.ic->inputPanel().preedit().empty() && s.ic->inputPanel().auxUp().empty(),
+                   s.name + "：编辑区挪到网格上，kimpanel 什么都不画，实际 " + preedit(s.ic.get()));
+         }},
+        {5, [fake, firstPage, listSize](VoiceScript &s) {
+             const auto &want = *firstPage;
+             check(fake->shows > 0 && fake->visible && fake->cols == 6 && fake->first == 0 && fake->cursor == 0 &&
+                       fake->page == 0 && fake->pages >= 2 && fake->cells.size() == 36,
+                   s.name + "：扩展收到第一屏 36 格、6 列、光标在第一个，实际 " +
+                       std::to_string(fake->cells.size()) + " 格 光标 " + std::to_string(fake->cursor) + " 共 " +
+                       std::to_string(fake->pages) + " 屏");
+             check(want.size() >= 6 && fake->cells.size() >= 6 &&
+                       std::equal(want.begin(), want.begin() + 6, fake->cells.begin()),
+                   s.name + "：第一行 6 格就是横排候选框的前 6 个：" + join(fake->cells));
+             check(fake->header == "shi", s.name + "：编辑区（应用不画时）画在网格上面：" + fake->header);
+             check(listSize(s) == 0, s.name + "：回执了，kimpanel 还是空列表");
+             // 键盘照旧：右移两格、下移一行，光标在第 9 个（第二行第三格）
+             type(s.ic.get(), "<right><right><down>");
+         }},
+        {6, [fake](VoiceScript &s) {
+             check(fake->cursor == 8 && fake->first == 0,
+                   s.name + "：右右下以后光标在第 9 格，实际 " + std::to_string(fake->cursor));
+             // 过时的一屏上点的不算
+             s.ic->committed.clear();
+             fake->send("Select", fake->serial - 1, 4);
+         }},
+        {7, [fake](VoiceScript &s) {
+             check(s.ic->committed.empty(), s.name + "：点的是过时的一屏，不选，实际 " + s.ic->committed);
+             // 点第 5 格
+             fake->hides = 0;
+             fake->send("Select", fake->serial, 4);
+         }},
+        {8, [fake, firstPage](VoiceScript &s) {
+             const auto &want = *firstPage;
+             check(want.size() > 4 && s.ic->committed == want[4],
+                   s.name + "：点第 5 格选第 5 个，实际 " + s.ic->committed);
+             check(fake->hides > 0 && !fake->visible, s.name + "：选了词，网格收起");
+             // 数字选光标所在行（和 kimpanel 的网格一样）
+             fresh(s.ic.get());
+             type(s.ic.get(), "zhi");
+             *firstPage = page(s.ic.get());
+             type(s.ic.get(), "<down><down>2");
+             check(firstPage->size() > 7 && s.ic->committed == (*firstPage)[7],
+                   s.name + "：数字选光标所在行，实际 " + s.ic->committed);
+             // Esc 收起
+             fresh(s.ic.get());
+             fake->hides = 0;
+             type(s.ic.get(), "shi<down><esc>");
+         }},
+        {9, [fake, listSize](VoiceScript &s) {
+             check(fake->hides > 0 && !fake->visible && listSize(s) > 6 && preedit(s.ic.get()) == "shi",
+                   s.name + "：Esc 收起网格，回到横排候选框");
+             // 一直下移到第 7 行：网格翻到第二屏
+             type(s.ic.get(), "<down><down><down><down><down><down><down>");
+         }},
+        {10, [fake](VoiceScript &s) {
+             check(fake->visible && fake->page == 1 && fake->first == 36 && fake->cursor == 36,
+                   s.name + "：下移到第 7 行，扩展收到第二屏，实际第 " + std::to_string(fake->page + 1) +
+                       " 屏、第一格 " + std::to_string(fake->first) + "、光标 " + std::to_string(fake->cursor));
+             // 鼠标点翻页按钮（#296）：过时的一屏上点的不算
+             fake->sendPage(fake->serial - 1, -1);
+         }},
+        {11, [fake](VoiceScript &s) {
+             check(fake->visible && fake->page == 1 && fake->first == 36,
+                   s.name + "：过时的一屏上点翻页不算，实际第 " + std::to_string(fake->page + 1) + " 屏");
+             // 点 ‹：回第一屏
+             fake->sendPage(fake->serial, -1);
+         }},
+        {12, [fake](VoiceScript &s) {
+             check(fake->visible && fake->page == 0 && fake->first == 0 && fake->cursor < 36 &&
+                       fake->cells.size() == 36 && s.ic->committed.empty(),
+                   s.name + "：点 ‹ 回第一屏，实际第 " + std::to_string(fake->page + 1) + " 屏、第一格 " +
+                       std::to_string(fake->first) + "、光标 " + std::to_string(fake->cursor));
+             // 点 ›：又到第二屏
+             fake->sendPage(fake->serial, 1);
+         }},
+        {13, [fake](VoiceScript &s) {
+             check(fake->visible && fake->page == 1 && fake->first == 36 && fake->cursor >= 36 &&
+                       preedit(s.ic.get()).empty(),
+                   s.name + "：点 › 到第二屏，实际第 " + std::to_string(fake->page + 1) + " 屏、第一格 " +
+                       std::to_string(fake->first) + "、光标 " + std::to_string(fake->cursor));
+             // 失去焦点：网格收起
+             fake->hides = 0;
+             s.ic->focusOut();
+         }},
+        {14, [fake, firstPage](VoiceScript &s) {
+             check(fake->hides > 0 && !fake->visible, s.name + "：失去焦点，网格收起");
+             s.ic->focusIn();
+             // 右键「忘掉这个词」（#229）：先学一个词（shi 的第 4 个选三次），展开以后它那一格能忘
+             fresh(s.ic.get());
+             type(s.ic.get(), "shi");
+             *firstPage = page(s.ic.get());
+             for (int i = 0; i < 3; ++i) {
+                 fresh(s.ic.get());
+                 type(s.ic.get(), "shi4");
+             }
+             fresh(s.ic.get());
+             type(s.ic.get(), "shi<down>");
+         }},
+        {15, [fake, firstPage](VoiceScript &s) {
+             const std::string word = firstPage->size() > 3 ? (*firstPage)[3] : "";
+             const auto at = std::find(fake->cells.begin(), fake->cells.end(), word);
+             const std::size_t i = at - fake->cells.begin();
+             check(fake->visible && at != fake->cells.end() && fake->forgettable.size() == fake->cells.size() &&
+                       fake->forgettable[i] == 1,
+                   s.name + "：学过的 " + word + " 那一格能「忘掉这个词」：" + join(fake->cells));
+             check(std::count(fake->forgettable.begin(), fake->forgettable.end(), 0) > 0,
+                   s.name + "：没学过的格子不给「忘掉这个词」");
+             // 过时的一屏上右键忘的不算
+             fake->shows = 0;
+             if (at != fake->cells.end()) {
+                 fake->send("Forget", fake->serial - 1, fake->first + static_cast<uint32_t>(i));
+             }
+         }},
+        {16, [fake, firstPage](VoiceScript &s) {
+             const std::string word = firstPage->size() > 3 ? (*firstPage)[3] : "";
+             const auto at = std::find(fake->cells.begin(), fake->cells.end(), word);
+             check(fake->shows == 0 && at != fake->cells.end() && fake->forgettable[at - fake->cells.begin()] == 1,
+                   s.name + "：过时的一屏上忘的不算");
+             if (const char *dictPath = std::getenv("WOWTYPE_USER_DICT")) {
+                 std::error_code ec;
+                 std::filesystem::remove(dictPath, ec);
+             }
+             if (at != fake->cells.end()) {
+                 fake->send("Forget", fake->serial, fake->first + static_cast<uint32_t>(at - fake->cells.begin()));
+             }
+         }},
+        {17, [fake, firstPage](VoiceScript &s) {
+             const std::string word = firstPage->size() > 3 ? (*firstPage)[3] : "";
+             const auto at = std::find(fake->cells.begin(), fake->cells.end(), word);
+             check(fake->shows > 0 && fake->visible && s.ic->committed.empty() && fake->header == "shi",
+                   s.name + "：忘掉以后网格重画、还开着，编辑区不动：" + fake->header);
+             check(at == fake->cells.end() || fake->forgettable[at - fake->cells.begin()] == 0,
+                   s.name + "：忘掉以后 " + word + " 不再能忘");
+             const char *dictPath = std::getenv("WOWTYPE_USER_DICT");
+             std::error_code ec;
+             for (int i = 0; dictPath && i < 300 && !std::filesystem::exists(dictPath, ec); ++i) {
+                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+             }
+             check(!dictPath || std::filesystem::exists(dictPath, ec),
+                   s.name + "：忘掉以后马上存了 user.tsv");
+             fresh(s.ic.get());
+             // 扩展「坏了」：不再回执
+             fake->ack = false;
+             type(s.ic.get(), "shi<down>");
+         }},
+        {18, [listSize](VoiceScript &s) {
+             check(listSize(s) == 0, s.name + "：刚展开时还在等扩展，kimpanel 是空列表");
+         }},
+        {25, [fake, listSize, framedRows](VoiceScript &s) {
+             check(listSize(s) > 0 && framedRows(s) && !fake->visible,
+                   s.name + "：等不到回执，退回 kimpanel 拼成几行的网格，叫扩展收起：" + join(page(s.ic.get())));
+             type(s.ic.get(), "<right>");
+             check(framedRows(s), s.name + "：之后照旧给 kimpanel 拼好的网格");
+             // 回执迟到了：下次照样交给扩展
+             fake->ack = true;
+             fake->send("Ack", fake->serial);
+         }},
+        {26, [listSize](VoiceScript &s) {
+             type(s.ic.get(), "<right>");
+             check(listSize(s) == 0, s.name + "：迟到的回执来了，又交给扩展画");
+         }},
+        // 扩展下线：正显示着的网格马上换回 kimpanel 的
+        {27, [grid](VoiceScript &) {
+             grid->show.reset();
+             grid->hide.reset();
+             grid->bus.reset();
+         }},
+        {29, [framedRows](VoiceScript &s) {
+             check(framedRows(s), s.name + "：扩展下线，正显示着的换回 kimpanel 拼好的网格：" +
+                                      join(page(s.ic.get())));
+             fresh(s.ic.get());
+             type(s.ic.get(), "shi<down>");
+             check(framedRows(s), s.name + "：扩展不在，展开照旧拼成几行给 kimpanel");
+             fresh(s.ic.get());
+             check(s.ic->committed.empty(), s.name + "：Esc 不上屏，实际 " + s.ic->committed);
+             std::printf("展开面板的网格：回执了就交给扩展画，等不到回执、扩展不在就退回 kimpanel\n");
+         }},
+    };
+    runVoiceScript(instance, "展开面板的网格", steps, done);
 }
 
 /// 语音浮条的回执（#170）：在会话总线上假装是 GNOME 扩展，收插件发的 State。
@@ -3748,7 +4384,7 @@ int main(int argc, char **argv) {
     FakeClipboardFactory clipboardFactory;
     StaticAddonRegistry registry{{"clipboard", &clipboardFactory}};
     instance.addonManager().registerDefaultLoader(
-        std::getenv("WOWTYPE_HARNESS_REAL_CLIPBOARD") ? nullptr : &registry);
+        realClipboard() ? nullptr : &registry);
     EventDispatcher mainDispatcher;
     mainDispatcher.attach(&instance.eventLoop());
     dispatcher = &mainDispatcher;
@@ -3760,12 +4396,16 @@ int main(int argc, char **argv) {
         runTranslateCase(instance, [&instance]() {
             runVoiceNoModelCase(instance, [&instance]() {
             runVoiceOverlayCase(instance, [&instance]() {
+            runGridOverlayCase(instance, [&instance]() {
                 runVoiceCase(instance, [&instance]() {
                     runVoiceCancelCases(instance, [&instance]() {
+                    runSyncCase(instance, [&instance]() {
                         std::printf(failures ? "KEY HARNESS FAILED (%d)\n" : "KEY HARNESS OK\n", failures);
                         instance.exit();
                     });
+                    });
                 });
+            });
             });
             });
         });

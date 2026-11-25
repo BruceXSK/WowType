@@ -149,7 +149,7 @@ engine)
   cmake --build "$work/build" -j"$(nproc)"
   DESTDIR="$stage" cmake --install "$work/build" >/dev/null
   rm -rf "$stage/usr/include"          # 头文件只给开发用
-  for bin in wowtype-check wowtype-show; do
+  for bin in wowtype-check wowtype-show wowtype-sync; do
     install -Dm755 "target/release/$bin" "$stage/usr/bin/$bin"
   done
   # 只处理 ELF（/usr/bin 里还有 Python 写的设置界面 wowtype-config）

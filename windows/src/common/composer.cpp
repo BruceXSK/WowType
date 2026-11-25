@@ -315,6 +315,33 @@ void Composer::select(int index) {
     }
 }
 
+std::optional<std::size_t> Composer::shownIndex(int index) {
+    if (index < 0 || !isComposing() || openPanel() != Panel::None) {
+        return std::nullopt;
+    }
+    const WowtypeFrame *frame = wowtype_session_frame(session_);
+    if (!frame || static_cast<std::size_t>(index) >= frame->cand_count) {
+        return std::nullopt;
+    }
+    return frame->cand_start + static_cast<std::size_t>(index);
+}
+
+bool Composer::canForget(int index) {
+    const auto at = shownIndex(index);
+    return at && wowtype_session_can_forget(session_, *at) == 1;
+}
+
+void Composer::forget(int index) {
+    const auto at = shownIndex(index);
+    if (!at) {
+        return;
+    }
+    const WowtypeFrame *frame = wowtype_session_forget(session_, *at);
+    if (frame && frame->handled) {
+        applyFrame(frame);
+    }
+}
+
 void Composer::turnPage(bool forward) {
     if (!isComposing() && openPanel() == Panel::None) {
         return;
@@ -351,6 +378,8 @@ void Composer::configure() {
     c.shift_double_tap = 1;
     c.translate_mode = translateAvailable();
     c.translate_key = config_.translateModeKey().has_value();
+    // 互译只翻一句（#191）：双击 Shift 进「译」，翻完回去的 frame 可能在 pollTranslation 里，TSF 比对模式跟上
+    c.translate_one_shot = config_.flag("TranslateOneShot");
     c.toolbar = config_.flag("Toolbar");
     c.clipboard_history = config_.flag("ClipboardHistory");
     c.shuangpin_keys = config_.flag("ShuangpinShowKeys");
@@ -485,14 +514,17 @@ bool Composer::sendToSession(const KeyInput &key, uint32_t action) {
 }
 
 void Composer::applyFrame(const WowtypeFrame *frame) {
+    // 离开「译」的那一下上屏的（只翻一句时的译文，原文原样上屏）照「译」记统计：会话已经切回去了（和 Linux 一样）
+    const Mode statsMode = frame && frame->mode_changed && appliedMode_ == Mode::Translate ? Mode::Translate : mode();
+    appliedMode_ = mode();
     if (frame && frame->commit && client_) {
         // 会话已经补好了空格、记了上文；互译时上屏的是译文、原文
         const std::string text = frame->commit;
         client_->insertText(text);
         if (onCommitStats) {
             // 打字统计（外壳按 TypingStats 决定记不记）：互译上屏的不是候选，位置记 0
-            const int index = hasFullFrame(frame) && mode() != Mode::Translate ? static_cast<int>(frame->choice_index) : 0;
-            onCommitStats(text, statsSource(), statsScheme(), index);
+            const int index = hasFullFrame(frame) && statsMode != Mode::Translate ? static_cast<int>(frame->choice_index) : 0;
+            onCommitStats(text, statsSource(statsMode), statsScheme(statsMode), index);
         }
         if (frame->learned && onCommit) {
             onCommit(text);
@@ -532,7 +564,13 @@ void Composer::refresh() {
         client_->showCandidates(nullptr);
         return;
     }
-    client_->setMarkedText(str(frame->preedit), frame->preedit_cursor);
+    // InlineSpaceSeparator 开着时输入框里音节之间用空格，不用 '（#247）：网页代码块的语法高亮把 '…' 当字符串，
+    // 打字时一对引号凑齐就重画这一段，浏览器跟丢正在输入的范围，前半截拼音被当成正文留下。空格也是一个字节，光标位置不变
+    std::string preedit = str(frame->preedit);
+    if (config_.flag("InlineSpaceSeparator")) {
+        std::replace(preedit.begin(), preedit.end(), '\'', ' ');
+    }
+    client_->setMarkedText(preedit, frame->preedit_cursor);
     const auto page = candidatePage(frame);
     client_->showCandidates(page ? &*page : nullptr);
 }
@@ -614,8 +652,8 @@ void Composer::drawTool() {
 }
 
 /// 统计用的输入模式：互译 / 英文 / 五笔 / 双拼 / 全拼（和 macOS 一样）。
-std::string Composer::statsSource() const {
-    switch (mode()) {
+std::string Composer::statsSource(Mode mode) const {
+    switch (mode) {
     case Mode::Translate: return "translate";
     case Mode::English: return "english";
     default: break;
@@ -627,8 +665,8 @@ std::string Composer::statsSource() const {
 }
 
 /// 双拼方案在统计里的名字（小写）；不是双拼时为空。
-std::string Composer::statsScheme() const {
-    if (!config_.shuangpin() || mode() != Mode::Chinese) {
+std::string Composer::statsScheme(Mode mode) const {
+    if (!config_.shuangpin() || mode != Mode::Chinese) {
         return {};
     }
     std::string scheme = config_.value("ShuangpinScheme");

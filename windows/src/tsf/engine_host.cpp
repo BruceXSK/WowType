@@ -123,7 +123,7 @@ void EngineHost::loadConfig() {
         ++configGeneration_;
         applyTranslateSettings();
         voice_.configure(config_.flag("Voice"), config_.value("VoiceKey"), config_.flag("VoiceCopy"),
-                         narrow(voiceModelDir()));
+                         narrow(voiceModelDir()), config_.number("VoiceSilenceTimeout"));
         if (stats_) {
             // 关掉时记录器丢掉内存里还没写的计数，以后什么都不记
             wowtype_stats_set_enabled(stats_, config_.flag("TypingStats"));
@@ -206,7 +206,7 @@ void EngineHost::applyTranslateSettings() {
     if (config_.flag("TranslateLocal")) {
         model = config_.value("TranslateLocalModel");
         if (model.empty()) {
-            model = narrow(dataDir() + L"\\models\\HY-MT1.5-1.8B-Q4_K_M.gguf");
+            model = narrow(dataDir() + L"\\models\\Hy-MT3-1.8B-Q4_K_M.gguf");
         }
         server = config_.value("TranslateLlamaServer");
     }

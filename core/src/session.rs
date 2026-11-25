@@ -542,6 +542,12 @@ pub struct Config {
     /// 另设了进出「译」的快捷键（[`KeyAction::ToggleTranslate`]）：单按 Shift 只在中 ↔ 英之间切
     /// （在「译」里单按回中文），不再绕到「译」。
     pub translate_key: bool,
+    /// 互译只翻一句（#191，有「译」时才起作用）：单按 Shift 只在中 ↔ 英之间切；开着
+    /// [`Config::shift_double_tap`] 时双击 Shift 不再两下都不算，而是进「译」（打到一半的拼音带进去）。
+    /// 怎么进的「译」（双击、[`KeyAction::ToggleTranslate`]、[`Session::set_mode`]）都只翻一句：译文上屏
+    /// （按过回车、译好了才上屏的在 [`Session::tick`] 里）、Esc、Shift+回车、单按 Shift、在「译」里再双击 /
+    /// 按互译键都回到进来前的模式（中或英），frame 里带 `mode_changed`。默认关，关着时和以前一样。
+    pub translate_one_shot: bool,
     /// 只打一个 v 再按空格打开工具栏（双拼、五笔、互译时不开）。
     pub toolbar: bool,
     /// 记剪贴板历史（设置里开了）：工具栏「剪贴板」页的提示看它。
@@ -583,6 +589,7 @@ impl Default for Config {
             shift_double_tap: false,
             translate_mode: false,
             translate_key: false,
+            translate_one_shot: false,
             toolbar: true,
             clipboard_history: false,
             shuangpin_keys: false,
@@ -696,6 +703,13 @@ pub struct Session<'e> {
     /// 上一个键是交给应用的退格：那时外壳报的光标前的字（#260）。应用删字、再报新的周围文字是异步的，
     /// 紧接着的下一个键报来的要是还和退格时一样，多半还是删之前的（删掉的那个数字），不能当真。
     backspace_prev: Option<Option<char>>,
+    /// 上一个键（修饰键不算）时外壳报的光标前的字；没带 [`key_hints::SURROUNDING`] 是 None。
+    reported_prev: Option<Option<char>>,
+    /// 会话上屏那一下外壳报的光标前的字（#295）。有的应用（Electron 系）报周围文字慢好几拍，
+    /// 上屏以后的键报来的还是上屏之前的那个字：只要还和它一样、又和会话自己记的上一个字不一样，
+    /// 就是应用还没跟上，用会话自己记的。报来的变了（跟上了，或者光标真的挪了）就照常信应用的；
+    /// 报的是光标前没有字时不算（空输入框上屏以后又被应用清空）。
+    commit_prev: Option<Option<char>>,
     /// 这次按键时外壳给的输入框情况（[`key_hints`]）。
     hints: u32,
     mode: Mode,
@@ -769,6 +783,8 @@ impl Default for Session<'_> {
             prev_char: None,
             last_char: None,
             backspace_prev: None,
+            reported_prev: None,
+            commit_prev: None,
             hints: 0,
             mode: Mode::Chinese,
             mode_changed: false,
@@ -895,9 +911,37 @@ impl<'e> Session<'e> {
         if stale {
             self.last_char = None;
         }
+        // 上屏以后报来的光标前的字还是上屏之前的那个、和会话自己记的上一个字对不上：应用报周围文字慢了
+        // （Electron 系慢好几拍，#295：「1:1复刻」后面的句号被当成数字后面的，成了半角点），用会话自己记的。
+        // 只认「和上屏前一模一样」：报来的是别的字就是光标真的挪了，照常信应用的。上屏以后把光标点回
+        // 原来那个字后面也会这样当，到下一次上屏为止。光标前没有字的不算：空的输入框里上屏、
+        // 应用又把它清空了（聊天框点了发送）很常见，那时上文要作废
+        let modifier_key = is_modifier_keysym(key.keysym);
+        let reported = (key.hints & key_hints::SURROUNDING != 0).then_some(key.prev_char);
+        let lagging = key.prev_char.is_some()
+            && self.commit_prev == reported
+            && self.last_char.is_some_and(|own| Some(own) != key.prev_char);
+        if !modifier_key {
+            // 外壳报修饰键时可能不带周围文字，不拿它当「报来的变了」
+            self.reported_prev = reported;
+            if !lagging {
+                self.commit_prev = None;
+            }
+        }
+        let key = &if lagging {
+            Key {
+                prev_char: self.last_char,
+                ..*key
+            }
+        } else {
+            *key
+        };
         self.prev_char = key.prev_char;
         self.next_char = key.next_char;
-        self.hints = key.hints;
+        if !matches!(key.keysym, keysym::SHIFT_L | keysym::SHIFT_R) {
+            // 外壳报 Shift 时不带提示：留着上一个键的（密码框里双击 Shift 进不了「译」，#191）
+            self.hints = key.hints;
+        }
         if !is_modifier_keysym(key.keysym) {
             // 上屏后紧接着按退格（编辑区空着，退格要交给应用删字）：刚才那次上屏是打错了，
             // 学到的东西退回去。按了别的键就不算了（只修最近一次、只在紧接着时）
@@ -928,8 +972,15 @@ impl<'e> Session<'e> {
                 self.set_context("");
             }
             if key.keysym == keysym::BACKSPACE && !self.composing() {
-                self.backspace_prev = Some(key.prev_char);
+                self.backspace_prev = Some(reported.flatten().or(key.prev_char));
                 self.last_char = None;
+            }
+            // 应用自己会打上的字（数字、半角标点、英文模式的字母）会话记了；别的键（方向键、退格、回车、
+            // 快捷键）以后光标前是什么会话不知道，报来的不再当成慢了的
+            let typed = key.modifiers & (modifier::CTRL | modifier::ALT | modifier::SUPER) == 0
+                && char::from_u32(key.keysym).is_some_and(|c| c.is_ascii_graphic());
+            if !typed {
+                self.commit_prev = None;
             }
             self.pair_key_passed(key);
         }
@@ -1298,6 +1349,8 @@ impl<'e> Session<'e> {
             self.translation.requested = None;
             self.clear_translation();
             self.push_commit(&snap.text);
+            // 只翻一句：译文上屏了，回到进来前的模式（按过回车、等译好的在 tick 里到这儿）
+            self.finish_one_shot();
             return;
         }
         self.translation.pending = true;
@@ -1320,12 +1373,18 @@ impl<'e> Session<'e> {
             return None;
         }
         if self.translation.source.is_empty() {
+            if key.keysym == keysym::ESCAPE && self.one_shot() {
+                // 只翻一句、还什么都没打：Esc 是不翻了，回到进来前的模式
+                self.finish_one_shot();
+                return Some(true);
+            }
             return None;
         }
         match key.keysym {
             keysym::RETURN | keysym::KP_ENTER => {
                 if key.modifiers & modifier::SHIFT != 0 {
                     self.commit_source();
+                    self.finish_one_shot();
                 } else {
                     self.commit_translation();
                 }
@@ -1337,6 +1396,7 @@ impl<'e> Session<'e> {
             }
             keysym::ESCAPE => {
                 self.clear_translation();
+                self.finish_one_shot();
                 Some(true)
             }
             keysym::BACKSPACE => {
@@ -1838,14 +1898,29 @@ impl<'e> Session<'e> {
         self.mode_changed = true;
     }
 
-    /// 单按 Shift 循环切换：中 → 英 →（有「译」、没另设进出「译」的键时）译 → 中。
+    /// 单按 Shift 循环切换：中 → 英 →（有「译」、没另设进出「译」的键、不是只翻一句时）译 → 中。
+    /// 只翻一句（[`Config::translate_one_shot`]）时在「译」里单按是不翻了，回到进来前的模式。
     fn toggle_mode(&mut self) {
+        let cycle = self.config.translate_mode && !self.config.translate_key && !self.config.translate_one_shot;
         let next = match self.mode {
             Mode::Chinese => Mode::English,
-            Mode::English if self.config.translate_mode && !self.config.translate_key => Mode::Translate,
+            Mode::English if cycle => Mode::Translate,
+            Mode::Translate if self.one_shot() => self.translate_from,
             Mode::English | Mode::Translate => Mode::Chinese,
         };
         self.switch_mode(next);
+    }
+
+    /// 互译只翻一句开着，而且有「译」。
+    fn one_shot(&self) -> bool {
+        self.config.translate_one_shot && self.config.translate_mode
+    }
+
+    /// 只翻一句的「译」翻完了（译文、原文上屏）或者不翻了（Esc）：回到进来前的模式。
+    fn finish_one_shot(&mut self) {
+        if self.mode == Mode::Translate && self.one_shot() {
+            self.switch_mode(self.translate_from);
+        }
     }
 
     /// 进出「译」的快捷键：在「译」里回到进来前的模式（翻译不能用了也回得去）；不在就进「译」，
@@ -1930,7 +2005,11 @@ impl<'e> Session<'e> {
             return Some(false);
         }
         if self.shift.pending.take().is_some() {
-            // 双击：第二下在间隔以内按下（晚了的在按下时已经切过了），两下都不算
+            // 双击：第二下在间隔以内按下（晚了的在按下时已经切过了），两下都不算。
+            // 互译只翻一句（#191）时双击是进出「译」：和互译键一样，打到一半的拼音带进去；进不了时两下都不算
+            if self.one_shot() {
+                return Some(self.toggle_translate());
+            }
             return Some(false);
         }
         if self.config.shift_double_tap && key.time_ms != 0 {
@@ -2542,16 +2621,52 @@ impl<'e> Session<'e> {
     /// emoji、日期时间这类没学过）；什么也没学过、是自定义词时什么也不做。
     /// 五笔码的候选是码表里的，五笔也不学，没有可忘的（同一个词拼音学过的不能顺手删掉）。
     fn forget_current(&mut self) {
+        if let Some(index) = self.current_index() {
+            self.forget_at(index);
+        }
+    }
+
+    /// 全部候选里第 index 个（不分页，和 [`Session::choose`] 一样）能不能忘掉：是学过的词
+    /// （用户词库里有、有选词热度或搭配，见 [`Engine::can_forget`]）。词库里本来就有、没学过的，
+    /// 自定义词，emoji、计算结果、日期时间，五笔码的候选，开着工具栏、表情面板、联想时，越界时都是 false。
+    /// 外壳的右键菜单据此决定给不给「忘掉这个词」；不改编辑区和候选框。
+    pub fn can_forget(&mut self, index: usize) -> bool {
+        let Some(engine) = self.engine else {
+            return false;
+        };
+        if !self.composing() || self.tool.is_some() || self.association.is_some() || self.wubi_code() {
+            return false;
+        }
+        self.candidates()
+            .get(index)
+            .is_some_and(|c| c.kind == CandidateKind::Word && engine.can_forget(&c.text))
+    }
+
+    /// 鼠标右键「忘掉这个词」：忘掉全部候选里第 index 个（不分页），和光标在它上面按 Ctrl+Delete 一样，
+    /// 候选原地重算，编辑区、页码和光标不动，真忘掉了 frame 带 `forgot`。没东西可忘时什么也不做；
+    /// 没在打字、开着工具栏 / 表情面板 / 联想、序号不对时 handled = false。
+    pub fn forget(&mut self, index: usize) -> Frame {
+        let ok = self.composing()
+            && self.tool.is_none()
+            && self.association.is_none()
+            && index < self.candidates().len();
+        if ok {
+            self.forget_at(index);
+        }
+        self.frame(ok)
+    }
+
+    /// 忘掉全部候选里第 index 个，见 [`Session::forget_current`]。
+    fn forget_at(&mut self, index: usize) {
         let Some(engine) = self.engine else {
             return;
         };
         if self.wubi_code() {
             return;
         }
-        let Some(index) = self.current_index() else {
+        let Some(chosen) = self.candidates().get(index) else {
             return;
         };
-        let chosen = &self.candidates[index];
         if chosen.kind != CandidateKind::Word || !engine.forget_word(&chosen.text) {
             return;
         }
@@ -2731,6 +2846,8 @@ impl<'e> Session<'e> {
         self.last_choice = None;
         // 切走输入法、失去焦点、点鼠标挪了光标（应用会重置输入法）：会话看不到之后光标去了哪
         self.pairs.clear();
+        self.reported_prev = None;
+        self.commit_prev = None;
         self.close_association();
         self.last_choice_index = 0;
         if commit_pending && self.composing() {
@@ -2762,6 +2879,10 @@ impl<'e> Session<'e> {
         let (shown, shown_caret) = self.segmented_remaining();
         let preedit_cursor = selected.len() + shown_caret;
         let preedit = selected + &shown;
+        if self.pending.is_some() && self.commit_prev.is_none() {
+            // 这次调用有字上屏（按键、鼠标点候选都走这里）：记下上屏前外壳报的光标前的字，见 commit_prev
+            self.commit_prev = self.reported_prev;
+        }
         let mut frame = Frame {
             handled,
             commit: self.pending.take(),
@@ -3361,6 +3482,11 @@ impl<'e> Session<'e> {
     fn commit_with(&mut self, tail: &str, tail_pinyin: &str) {
         let text = self.selected_text() + tail;
         self.commit_start = Some(self.learn_mark());
+        // 从候选框里选的原始英文串：拼音就是原串的小写（Verah / verah）。
+        // 回车、标点上屏的原始串传的是空拼音，不会走到这里——终端里的密码照样不学。
+        let english = !tail.is_empty()
+            && tail.bytes().all(|b| b.is_ascii_alphabetic())
+            && tail.eq_ignore_ascii_case(tail_pinyin);
         // 回车、打字途中按标点上屏的原始字母串（没有拼音）不记：排序用不上它（原始串和英文候选的位置
         // 不看选词记录，没有拼音也收不进用户词库），记下来只是在 history.tsv 里留一份明文——
         // 终端里的 sudo 提示没有密码框标记，中文模式下打密码再回车，密码就这样进了输入习惯
@@ -3368,12 +3494,19 @@ impl<'e> Session<'e> {
         let learns = !self.selections.is_empty() || (!tail.is_empty() && !raw_tail);
         if self.engine.is_some() && learns && !self.wubi() && !self.sensitive() {
             self.learned = true;
-            if !tail.is_empty() && !raw_tail {
+            if english {
+                // 选够次数后收进用户英文词表，下次打 verah 还原成 Verah 并排首选。
+                // 不走普通选词：w 行不存纯 ASCII，收进拼音词库也没有合法读音。
+                if let Some(engine) = self.engine {
+                    engine.record_english_selection(tail);
+                }
+            } else if !tail.is_empty() && !raw_tail {
                 // 带上拼音：选够次数后引擎会自动把这个词收进用户词库
                 self.learn(tail, tail_pinyin);
             }
             // 以词定字取出来的字对不上读音时拼音是空的，这样拼成的不学
-            if !self.selections.is_empty()
+            if !english
+                && !self.selections.is_empty()
                 && !tail.is_empty()
                 && !tail_pinyin.is_empty()
                 && self.selections.iter().all(|s| !s.pinyin.is_empty())

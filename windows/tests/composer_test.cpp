@@ -801,6 +801,88 @@ int main(int argc, char **argv) {
         check(!c->isComposing() && client->marked.empty() && !client->page, "上屏后清空编辑区和候选框");
     }
     {
+        // InlineSpaceSeparator（#247）：输入框里音节用空格分，光标位置不变；默认关，照旧 '
+        Config config;
+        config.setValue("InlineSpaceSeparator", "True");
+        auto [c, client] = fresh(config);
+        type(*c, "nihao");
+        check(client->marked == "ni hao" && client->markedCursor == static_cast<int>(client->marked.size()),
+              "打开 InlineSpaceSeparator：输入框里是 ni hao", client->marked);
+        c->handle(KeyInput::key(keysym::escape));
+        type(*c, "xi'an");
+        // 后面怎么切看词库（小词库里 an 可能切成 a'n），这里只看输入框里没有 '
+        check(client->marked.rfind("xi ", 0) == 0 && client->marked.find('\'') == std::string::npos,
+              "手动分隔的 xi'an：输入框里没有 '", client->marked);
+    }
+    {
+        // 右键「忘掉这个词」（#229，和 macOS、fcitx5 一样）：学过的词才有，按显示的序号忘，光标不挪；
+        // Ctrl+Delete 忘光标处的
+        check(std::string(Composer::forgetMenuTitle) == "忘掉这个词", "右键菜单的字样");
+        auto [c, client] = fresh();
+        int forgets = 0;
+        c->onForget = [&forgets] { ++forgets; };
+        const auto indexOf = [&client = *client](const std::string &text) {
+            const auto t = client.texts();
+            const auto it = std::find(t.begin(), t.end(), text);
+            return it == t.end() ? -1 : static_cast<int>(it - t.begin());
+        };
+        for (int i = 0; i < 2; ++i) {
+            type(*c, "nihao");
+            if (const int ni = indexOf("尼"); ni >= 0) {
+                c->select(ni);
+                if (const int hao = indexOf("号"); hao >= 0) {
+                    c->select(hao);
+                }
+            }
+        }
+        check(client->committed == "尼号尼号", "选 尼 再选 号 上屏 尼号（两次）", client->committed);
+        client->committed.clear();
+        type(*c, "nihao");
+        const auto learned = client->texts();
+        const int at = indexOf("尼号");
+        const int cursor = client->page ? client->page->cursor : -2;
+        check(at >= 0 && c->canForget(at), "学会的 尼号 能忘", join(learned));
+        check(!c->canForget(static_cast<int>(learned.size())) && !c->canForget(-1), "越界的不能忘");
+        int plain = -1;
+        for (int i = 0; i < static_cast<int>(learned.size()) && plain < 0; ++i) {
+            if (!c->canForget(i)) {
+                plain = i;
+            }
+        }
+        // 小词库里这一页可能都选过（前面的用例上屏过 你好、你）：有没学过的才看它
+        if (plain >= 0) {
+            c->forget(plain);
+            check(forgets == 0 && client->texts() == learned, "没学过的忘了也什么都不做");
+        }
+        const std::string marked = client->marked;
+        c->forget(at);
+        check(forgets == 1 && client->committed.empty() && client->marked == marked && c->input() == "nihao" &&
+                  client->page && client->page->cursor == cursor,
+              "右键忘掉以后马上存，编辑区、光标不动", std::to_string(forgets) + " " + client->marked);
+        const int after = indexOf("尼号");
+        check(after < 0 || after > at, "忘掉以后 尼号 不再排在原来的位置", join(learned) + "-> " + join(client->texts()));
+        check(after < 0 || !c->canForget(after), "忘掉以后不再能忘");
+        c->handle(KeyInput::key(keysym::escape));
+        check(!c->canForget(0), "没在打字时没有右键菜单");
+        // Ctrl+Delete：忘掉光标处的（再学一次，光标挪过去）
+        for (int i = 0; i < 2; ++i) {
+            type(*c, "nihao");
+            if (const int ni = indexOf("尼"); ni >= 0) {
+                c->select(ni);
+                if (const int hao = indexOf("号"); hao >= 0) {
+                    c->select(hao);
+                }
+            }
+        }
+        type(*c, "nihao");
+        for (int i = 0, n = indexOf("尼号"); i < n; ++i) {
+            c->handle(KeyInput::key(keysym::right));
+        }
+        check(c->handle(KeyInput::key(keysym::del, mod::control)) && forgets == 2 && c->input() == "nihao",
+              "Ctrl+Delete 忘掉光标处学过的词", std::to_string(forgets));
+        c->handle(KeyInput::key(keysym::escape));
+    }
+    {
         auto [c, client] = fresh();
         type(*c, "shi");
         const auto texts = client->texts();
@@ -986,6 +1068,62 @@ int main(int argc, char **argv) {
         c->shiftChanged(false, false, 7680, false);
         check(c->mode() == Composer::Mode::English && settleShift(*c, 8100) && c->mode() == Composer::Mode::Chinese,
               "第二下到时间也切");
+    }
+    {
+        // #191：互译只翻一句（TranslateOneShot）。翻译器填了地址和模型就算能翻（这里连不上，不等译文：
+        // 译文上屏以后回去在核心的会话测试、fcitx5 按键测试里测）
+        WowtypeTranslator *translator = wowtype_translate_new();
+        wowtype_translate_configure(translator, "http://127.0.0.1:9/v1", "mock", "en", 0, nullptr);
+        Config config;
+        config.setValue("Translate", "True");
+        config.setValue("TranslateOneShot", "True");
+        auto [c, client] = fresh(config);
+        c->setTranslator(translator);
+        std::vector<std::string> seen;
+        c->onCommitStats = [&](const std::string &text, const std::string &source, const std::string &, int index) {
+            seen.push_back(text + "|" + source + "|" + std::to_string(index));
+        };
+        using M = Composer::Mode;
+        const auto doubleTap = [&c = c](uint64_t at) {
+            c->shiftChanged(true, false, at, false);
+            c->shiftChanged(false, false, at + 80, false);
+            c->shiftChanged(true, false, at + 250, false);
+            return c->shiftChanged(false, false, at + 330, false);
+        };
+        c->shiftChanged(true, false, 1000, false);
+        c->shiftChanged(false, false, 1080, false);
+        check(settleShift(*c, 1500) && c->mode() == M::English, "#191：单按 Shift 先到英文");
+        check(doubleTap(2000) && c->mode() == M::Translate, "#191：英文里双击进「译」（这一下切了模式）");
+        check(!settleShift(*c, 3000) && c->mode() == M::Translate, "#191：过了间隔也不再切");
+        type(*c, "nihao ");
+        check(c->translateSource() == "你好" && client->committed.empty(), "#191：打的字攒成原文", c->translateSource());
+        check(c->handle(KeyInput::key(keysym::escape)) && c->mode() == M::English && client->committed.empty() &&
+                  c->translateSource().empty(),
+              "#191：Esc 放弃，回到英文", client->committed);
+        c->shiftChanged(true, false, 4000, false);
+        c->shiftChanged(false, false, 4080, false);
+        check(settleShift(*c, 4500) && c->mode() == M::Chinese, "#191：单按回中文（不经过「译」）");
+        // 打到一半双击：拼音带进「译」接着打；Shift+回车上屏原文，回到中文，照「译」记统计
+        type(*c, "ni");
+        check(doubleTap(5000) && c->mode() == M::Translate && c->isComposing() && client->committed.empty(),
+              "#191：打到一半双击，拼音带进「译」", client->committed);
+        type(*c, "hao ");
+        check(c->translateSource() == "你好", "#191：接着打完进原文", c->translateSource());
+        check(c->handle(KeyInput::key(keysym::returnKey, mod::shift)) && c->mode() == M::Chinese &&
+                  client->committed == "你好" && seen.size() == 1 && seen[0] == "你好|translate|0",
+              "#191：Shift+回车上屏原文，回到中文", client->committed + " " + join(seen));
+        // 「译」里再双击：回去
+        check(doubleTap(7000) && c->mode() == M::Translate, "#191：中文里双击进「译」");
+        check(doubleTap(8000) && c->mode() == M::Chinese, "#191：「译」里再双击回中文");
+        // 关着：双击两下都不算，单按照旧 中 → 英 → 译
+        config.setValue("TranslateOneShot", "False");
+        c->apply(config);
+        check(!doubleTap(9000) && !settleShift(*c, 10000) && c->mode() == M::Chinese, "#191：关着时双击 Shift 不切");
+        tapShift(*c);
+        tapShift(*c);
+        check(c->mode() == M::Translate, "#191：关着时单按照旧切到「译」");
+        c->setTranslator(nullptr);
+        wowtype_translate_free(translator);
     }
     {
         // 系统要结束组字：打的字母原样上屏，不带分音节的隔音符

@@ -180,11 +180,16 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// 本地翻译模型现在用的文件和它在不在。
+    /// 本地翻译模型现在用的文件和它在不在（新的没下载、上一代的还在时是上一代的，和核心一样）。
     var localModelFile: (path: String, exists: Bool) {
         let path = config.translateLocalModel.isEmpty
-            ? defaultLocalModel : (config.translateLocalModel as NSString).expandingTildeInPath
+            ? localLegacyModel ?? defaultLocalModel : (config.translateLocalModel as NSString).expandingTildeInPath
         return (path, FileManager.default.fileExists(atPath: path))
+    }
+
+    /// 还在用上一代模型（升级前下载的）时它的位置；自己写了模型位置的不算
+    var localLegacyModel: String? {
+        config.translateLocalModel.isEmpty ? LocalModelInstaller.legacyModel(defaultModel: defaultLocalModel) : nil
     }
 
     /// 马上写（关窗口、退出、用文本编辑打开之前）。
@@ -463,7 +468,7 @@ final class SettingsModel: ObservableObject {
     /// 还差什么：模型看 localModelFile，llama-server 和输入法找的地方一样
     var localPlan: LocalModel.Plan {
         LocalModelInstaller.plan(model: localModelFile.path, customServer: config.translateLlamaServer,
-                                 supportDir: supportDir)
+                                 supportDir: supportDir, legacy: localLegacyModel != nil)
     }
 
     /// 翻译配好了：本地模型下载好了，或者选了哔哩哔哩（不用 Key，模型空着用 2B），或者填了翻译服务的地址和模型
@@ -493,29 +498,36 @@ final class SettingsModel: ObservableObject {
         let fm = FileManager.default
         let model = config.translateLocalModel.isEmpty ? defaultLocalModel : nil
         return model.map { fm.fileExists(atPath: $0) || fm.fileExists(atPath: $0 + ".part") } == true
+            || localLegacyModel != nil
             || fm.fileExists(atPath: LocalModelInstaller.llamaDir(in: supportDir).path)
     }
 
-    /// 点「下载」：要下模型时先确认许可（下了一半接着下、只差 llama-server 时不再问）
+    /// 点「下载」或「升级」：要下模型时先确认（下了一半接着下、只差 llama-server 时不再问）。
+    /// 升级：还在用上一代模型、别的都齐了，把新模型下到默认位置，下好以后删掉上一代的。
     func downloadLocalModel() {
-        let plan = localPlan
+        let current = localPlan
+        let upgrade = current.canUpgrade
+        let plan = upgrade ? LocalModel.upgradePlan : current
         guard !localBusy, plan.canDownload else { return }
-        let model = localModelFile.path
+        let model = upgrade ? defaultLocalModel : localModelFile.path
         guard plan.wantModel, !LocalModelInstaller.hasPartial(model: model) else {
-            startLocalDownload()
+            startLocalDownload(upgrade: upgrade)
             return
         }
         let alert = NSAlert()
-        alert.messageText = "下载离线翻译模型？"
-        let llama = plan.wantLlama ? "同时下载运行模型的程序 llama-server（llama.cpp 官方发布，MIT 许可）。" : ""
-        alert.informativeText = "一共 \(LocalModel.sizeText(plan.bytes))，下载完会校验文件。\(llama)\n\n"
-            + LocalModel.terms + "\n\n点「同意并下载」表示你接受这份许可。"
-        alert.accessoryView = LinkButton(title: "许可协议全文", url: URL(string: LocalModel.license)!)
-        alert.addButton(withTitle: "同意并下载")
+        alert.messageText = upgrade ? "升级离线翻译模型？" : "下载离线翻译模型？"
+        var extra = plan.wantLlama ? "同时下载运行模型的程序 llama-server（llama.cpp 官方发布，MIT 许可）。" : ""
+        if upgrade {
+            extra = "下好以后删掉上一代的 \(LocalModel.legacyName)，下载期间照旧用它翻译。"
+        }
+        alert.informativeText = "一共 \(LocalModel.sizeText(plan.bytes))，下载完会校验文件。\(extra)\n\n"
+            + LocalModel.terms
+        alert.accessoryView = LinkButton(title: "许可全文", url: URL(string: LocalModel.license)!)
+        alert.addButton(withTitle: upgrade ? "升级" : "下载")
         alert.addButton(withTitle: "取消")
         let answered: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             if response == .alertFirstButtonReturn {
-                self?.startLocalDownload()
+                self?.startLocalDownload(upgrade: upgrade)
             }
         }
         if let window = NSApp.keyWindow ?? NSApp.windows.first(where: \.isVisible) {
@@ -525,14 +537,18 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    private func startLocalDownload() {
-        let plan = localPlan
+    private func startLocalDownload(upgrade: Bool = false) {
+        let current = localPlan
+        guard !upgrade || current.canUpgrade else { return }
+        let plan = upgrade ? LocalModel.upgradePlan : current
         guard !localBusy, plan.canDownload else { return }
         let control = DownloadControl()
         localControl = control
         localError = nil
         localProgress = LocalModelInstaller.Progress(stage: .connecting, done: 0, total: plan.bytes)
-        let model = localModelFile.path
+        let model = upgrade ? defaultLocalModel : localModelFile.path
+        // 没自己写模型位置时，新模型下好了就删掉旁边上一代的
+        let defaultModel = config.translateLocalModel.isEmpty ? defaultLocalModel : nil
         let supportDir = self.supportDir
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result {
@@ -541,6 +557,9 @@ final class SettingsModel: ObservableObject {
                         guard let self, self.localControl === control else { return }
                         self.localProgress = progress
                     }
+                }
+                if let defaultModel {
+                    LocalModelInstaller.removeLegacy(defaultModel: defaultModel)
                 }
             }
             DispatchQueue.main.async { [weak self] in

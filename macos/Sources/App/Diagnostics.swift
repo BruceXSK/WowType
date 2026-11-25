@@ -71,7 +71,7 @@ enum Diagnostics {
             .map { state.resourceDir.appendingPathComponent($0).path }
         let data = ["lexicon.tsv", "lexicon.tsv.wcache", "words.domain.lm", "wetype/\(NnlmInstaller.fileName)",
                     LexiconPack.folderName, LexiconPack.folderName + "/lexicon.tsv.wcache",
-                    "wtlocal", "models/\(LocalModel.fileName)", "llama", "update-state"]
+                    "wtlocal", "models/\(LocalModel.fileName)", "models/\(LocalModel.legacyFileName)", "llama", "update-state"]
             .map { support.appendingPathComponent($0).path }
         for path in resources + data {
             add(fileLine(path))
@@ -93,16 +93,20 @@ enum Diagnostics {
         let voiceSwitch = config.voice ? "开（\(config.voiceKey)）" : "关"
         add("语音模型：\(voiceModel)，语音输入\(voiceSwitch)")
         add("麦克风：" + microphone())
+        let legacyModel = config.translateLocalModel.isEmpty
+            ? LocalModelInstaller.legacyModel(defaultModel: state.localModelPath) : nil
         let model = config.translateLocalModel.isEmpty
-            ? state.localModelPath : (config.translateLocalModel as NSString).expandingTildeInPath
-        let plan = LocalModelInstaller.plan(model: model, customServer: config.translateLlamaServer, supportDir: support)
+            ? legacyModel ?? state.localModelPath : (config.translateLocalModel as NSString).expandingTildeInPath
+        let plan = LocalModelInstaller.plan(model: model, customServer: config.translateLlamaServer, supportDir: support,
+                                            legacy: legacyModel != nil)
         let service = "翻译服务 \(DiagnosticsText.maskURL(config.translateBaseUrl)) \(config.translateModel)"
         add("互译：\(config.translate ? "开" : "关")，\(config.translateLocal ? "本地模型" : service)")
         var lacking: [String] = []
         if plan.wantModel { lacking.append("模型") }
         if plan.wantLlama { lacking.append(plan.llamaOutdated ? "llama-server（下载的构建旧了）" : "llama-server") }
         if plan.llamaUnavailable { lacking.append("llama-server（这台 Mac 下载不了）") }
-        add("本地翻译模型：" + (plan.ready ? "已就绪" : "缺" + lacking.joined(separator: "、")))
+        add("本地翻译模型：" + (plan.ready ? "已就绪" : "缺" + lacking.joined(separator: "、"))
+            + (plan.legacy ? "（上一代的 \(LocalModel.legacyName)）" : ""))
         if let server = LocalModelInstaller.findServer(custom: config.translateLlamaServer, supportDir: support) {
             add("llama-server：\(server)" + (LocalModelInstaller.downloadedBuild(in: support).map { "（下载的 \($0)）" } ?? ""))
         }

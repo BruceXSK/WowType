@@ -58,10 +58,27 @@ jobs:
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
+      - name: 跨设备复制粘贴的中转服务（Cloudflare Worker 的代码，在 node 里跑）
+        run: node --test relay/cloudflare/test/relay.test.mjs
       - name: C ABI 冒烟测试
         run: ./scripts/abi-smoke.sh
       - name: Windows 外壳里和平台无关的部分（组字、设置、语音键、自定义词、统计）在 Linux 上也测
         run: windows/test.sh
+
+  relay:
+    # 跨设备复制粘贴的中转服务（relay/cloudflare）在 Cloudflare 的本地运行时（wrangler dev 起的 workerd，
+    # 真的 Durable Object）里走一遍接口。要从 npm 下 wrangler，不在 release 的 needs 里，挂了不挡发版。
+    name: 中转服务（workerd）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 起 wrangler dev，对着它跑验收脚本
+        working-directory: relay/cloudflare
+        run: |
+          echo 'TOKEN=ci-token' > .dev.vars
+          WRANGLER_SEND_METRICS=false npx --yes wrangler@4 dev --port 8791 --ip 127.0.0.1 > wrangler.log 2>&1 &
+          for _ in $(seq 90); do curl -sf http://127.0.0.1:8791/ >/dev/null && break; sleep 1; done
+          node test/live.mjs http://127.0.0.1:8791 ci-token || { cat wrangler.log; exit 1; }
 
   core-macos:
     # 核心和 C 接口在 macOS 上一直能编、能过测试。不在 release 的 needs 里，挂了不挡 Linux 发版。
@@ -588,6 +605,8 @@ jobs:
             echo "安装包里有不能分发的模型"; exit 1
           fi
           wowtype-check --lexicon /usr/share/wowtype/lexicon.tsv --s2t /usr/share/wowtype/s2t.tsv
+          # 跨设备复制粘贴的配对工具装上了、起得来
+          wowtype-sync status --state /tmp/wowtype-sync-smoke.json | grep -q '"paired":false'
           wowtype-show --lexicon /usr/share/wowtype/lexicon.tsv nihao | tee /tmp/show.txt
           grep -q '1\.你好' /tmp/show.txt
           # 设置界面：能 import GTK 4 / libadwaita，拼音整理逻辑正确
@@ -669,6 +688,8 @@ jobs:
             echo "安装包里有不能分发的模型"; exit 1
           fi
           wowtype-check --lexicon /usr/share/wowtype/lexicon.tsv --s2t /usr/share/wowtype/s2t.tsv
+          # 跨设备复制粘贴的配对工具装上了、起得来
+          wowtype-sync status --state /tmp/wowtype-sync-smoke.json | grep -q '"paired":false'
           # 不用 grep -q 直接接在管道后面，避免 pipefail 把上游 SIGPIPE 当成测试失败。
           wowtype-show --lexicon /usr/share/wowtype/lexicon.tsv nihao | tee dist/show.txt
           grep -q '1\.你好' dist/show.txt
@@ -751,6 +772,8 @@ jobs:
             echo "安装包里有不能分发的模型"; exit 1
           fi
           wowtype-check --lexicon /usr/share/wowtype/lexicon.tsv --s2t /usr/share/wowtype/s2t.tsv
+          # 跨设备复制粘贴的配对工具装上了、起得来
+          wowtype-sync status --state /tmp/wowtype-sync-smoke.json | grep -q '"paired":false'
           # 不用 grep -q 直接接在管道后面，避免 pipefail 把上游 SIGPIPE 当成测试失败。
           wowtype-show --lexicon /usr/share/wowtype/lexicon.tsv nihao | tee dist/show.txt
           grep -q '1\.你好' dist/show.txt
@@ -807,6 +830,8 @@ jobs:
           test -f /usr/share/fcitx5/addon/wowtype.conf
           test -f /usr/share/fcitx5/inputmethod/wowtype.conf
           wowtype-check --lexicon /usr/share/wowtype/lexicon.tsv --s2t /usr/share/wowtype/s2t.tsv
+          # 跨设备复制粘贴的配对工具装上了、起得来
+          wowtype-sync status --state /tmp/wowtype-sync-smoke.json | grep -q '"paired":false'
           wowtype-show --lexicon /usr/share/wowtype/lexicon.tsv nihao | tee dist/show.txt
           grep -q '1\.你好' dist/show.txt
           wowtype-config --self-test
@@ -879,11 +904,15 @@ jobs:
           cat > notes.md <<EOF
           ## 这一版要注意
 
-          - 升级以后要重启一次输入法才用上新版：设置界面会提醒，点「重启」就行（一键安装脚本也会问）。第一次启动会重建一次词库快照（格式换了），多等一两秒。
-          - 占的内存少了四分之三：默认词库约 124 MB（以前约 515 MB），万象词库约 180 MB（以前约 876 MB）；启动时载入词库从约 1 秒变成几十毫秒。候选一个不变。
-          - 设置的统计页在窄窗口、高缩放下不再被裁掉：标签和键盘热力图跟着窗口宽度缩放。
-          - 翻译引擎的「哔哩哔哩」选项缩短成「哔哩哔哩（免费）」，200% 缩放下拉菜单不再截断；Windows 设置也有了「本地 / 哔哩哔哩 / 自定义」三选一和测试连接。
-          - 0.7.3 的内容：逐键提速、最近常选的字当首选、连不上 GitHub 时的安装办法。
+          - 升级以后要重启一次输入法才用上新版：设置界面会提醒，点「重启」就行（一键安装脚本也会问）。GNOME 上更新后要注销重新登录一次，才会载入新的扩展。
+          - 新功能「跨设备复制粘贴」（默认关）：一台电脑上复制的文字，在另一台装了 WowType 的电脑上直接粘贴，Linux、macOS、Windows 之间都行。不用账号、不经过 WowType 的服务器，内容端到端加密。在设置「输入」页（Windows 是「跨设备」页）打开，一台点「显示配对码」、另一台输入这 6 位数字就配好。同一个局域网里直接传；不在一个局域网的，按仓库里 relay/cloudflare/README.md 在自己的 Cloudflare 账号里部署一个中转服务，把地址和口令填进设置。只传文字，不传文件和图片。这是第一版，还没在两台真机之间试过：macOS、Windows 上只通过了编译；GNOME 的 Wayland 会话里这台设备可能发不出去（能收）；Linux 上分不出密码管理器复制的密码，会一起传过去，介意的先别开。说明见 docs/SYNC.md（#321）。
+          - 0.7.12 的内容：本地翻译（离线）的模型换成腾讯混元新开源的 Hy-MT3 1.8B（1.35 GB，Apache-2.0 许可，没有地区限制）：译文更贴原文、不再自己加词，速度和内存和以前差不多。以前下载过 HY-MT 1.5 的不用重新下载、照旧能用；在设置「翻译」页点「升级」（Windows 上再点一次下载）换成新的，下载期间照旧用旧的翻译，新的下好、校验过了就自动删掉旧模型，不多占 1 GB 磁盘。下载前不用再确认许可。
+          - 0.7.11 的内容：中文模式下会学英文人名、专有名词了：词表里没有的英文（比如 Verah），从候选框里选够 3 次就记住，以后打 verah 直接出 Verah 并排第一；回车上屏的字母照旧不学。学错了在它上面点右键选「忘掉这个词」，或者按 Ctrl+Delete。带大写字母打、中文又只能勉强凑出来时，原样的英文直接排第一（#297）；GNOME 展开的 6×6 候选面板底部多了 ‹ / › 翻页按钮和页码，可以用鼠标翻页（#296）；修了 Chrome、VS Code 这类应用里，数字后面打了词再打句号，句号变成半角点的问题（#295）。
+          - 0.7.10 的内容：新设置「输入框里的拼音用空格分音节」（默认关）：在网页的代码块里（比如 ChatGPT）打字留下半截拼音时打开，写在输入框里的拼音就是 ni hao，不再用 ni'hao；候选框里照旧（#247）。0.7.9 把它直接改成了空格，这一版改回默认 ni'hao，需要的人自己打开。
+          - 0.7.8 的内容：一键安装认得统信 UOS V25 了：和 deepin 25 同源，装 deepin 25 的安装包（x86_64）。UOS 20 和 deepin 20 一样缺 GTK 4，暂不支持。
+          - 0.7.7 的内容：学错的词可以用鼠标删了：在候选上点右键，选「忘掉这个词」，和光标移到它上面按 Ctrl+Delete 一样。只有学过的词（自己打出来、选过的）才有这一项。Linux 上要 fcitx5 5.1.10 以上（GNOME 的普通候选框没有右键菜单，按下键展开的 6×6 面板里有）；macOS 右键或按住 Control 点；Windows 右键。
+          - 0.7.6 的内容：新设置「双击 Shift 单次互译」（「翻译」页，默认关）；GNOME 展开的 6×6 候选面板由 WowType 扩展画，只高亮当前这个词，能用鼠标点选。
+          - 0.7.5 的内容：语音「停顿多久自动结束」可以设。
 
           ## 安装（Ubuntu / Debian、deepin、Arch Linux、Fedora、NixOS）
 

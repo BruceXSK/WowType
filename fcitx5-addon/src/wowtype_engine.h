@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <utility>
 #include <cstddef>
+#include <functional>
 #include <future>
 #include <memory>
 #include <optional>
@@ -23,6 +24,7 @@
 #include <fcitx-utils/dbus/objectvtable.h>
 #include <fcitx-utils/dbus/servicewatcher.h>
 #include <fcitx-utils/event.h>
+#include <fcitx-utils/handlertable.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
 #include <fcitx-utils/trackableobject.h>
@@ -31,6 +33,7 @@
 
 namespace fcitx {
 class Instance;
+class Event;
 class InputContext;
 class InputContextEvent;
 class InputPanel;
@@ -221,6 +224,8 @@ FCITX_CONFIGURATION(
     fcitx::Option<bool> fuzzyEngOng{this, "FuzzyEngOng", "模糊音：eng = ong", false};
     fcitx::Option<bool> typo{this, "TypoCorrection", "按错键自动纠正", true};
     fcitx::Option<bool> rareExt{this, "RareExtChars", "候选末尾列出扩展 B 区以后的生僻字", false};
+    fcitx::Option<bool> inlineSpace{this, "InlineSpaceSeparator",
+                                    "输入框里的拼音用空格分音节（网页代码块里留下半截拼音时打开）", false};
     fcitx::Option<WowtypeInputScheme, fcitx::NoConstrain<WowtypeInputScheme>,
                   fcitx::DefaultMarshaller<WowtypeInputScheme>, WowtypeInputSchemeAnnotation>
         inputScheme{this, "InputScheme", "输入方案", WowtypeInputScheme::Quanpin};
@@ -263,6 +268,19 @@ FCITX_CONFIGURATION(
     // 默认关：fcitx5 的 clipboard 插件不告诉我们哪条是密码管理器复制的密码
     fcitx::Option<bool> clipboardHistory{this, "ClipboardHistory",
                                          "记录剪贴板历史（只在内存里，最多 20 条）", false};
+    // 跨设备复制粘贴：一台设备上复制的文字，在配过对的另一台上直接粘贴。默认关（和剪贴板历史一样，
+    // clipboard 插件不告诉我们哪条是密码管理器复制的密码）；配对在 WowType 设置里做
+    fcitx::Option<bool> clipboardSync{this, "ClipboardSync",
+                                      "跨设备复制粘贴（先在 WowType 设置里配对）", false};
+    fcitx::Option<bool> clipboardSyncLan{this, "ClipboardSyncLan",
+                                         "跨设备复制粘贴：同一个局域网里直接传", true};
+    fcitx::Option<std::string> clipboardSyncRelayUrl{
+        this, "ClipboardSyncRelayUrl", "跨设备复制粘贴：自己部署的中转服务地址（留空不用）", ""};
+    fcitx::Option<std::string> clipboardSyncDeviceName{
+        this, "ClipboardSyncDeviceName", "跨设备复制粘贴：这台设备的名字（留空用主机名）", ""};
+    fcitx::Option<bool> clipboardSyncPaste{
+        this, "ClipboardSyncPaste",
+        "跨设备复制粘贴：收到的也放进系统剪贴板（能直接 Ctrl+V）", true};
     fcitx::Option<bool> autoSpace{this, "AutoSpace", "汉字和英文、数字之间自动加空格", false};
     fcitx::Option<bool> autoSpaceLetters{this, "AutoSpaceLetters", "汉字和英文字母之间", true};
     fcitx::Option<bool> autoSpaceDigits{this, "AutoSpaceDigits", "汉字和数字之间", true};
@@ -274,6 +292,11 @@ FCITX_CONFIGURATION(
         this, "VoiceKey", "语音输入键（按住说话，或点一下开始）", fcitx::Key(FcitxKey_Alt_R),
         fcitx::KeyConstrain({fcitx::KeyConstrainFlag::AllowModifierOnly,
                              fcitx::KeyConstrainFlag::AllowModifierLess})};
+    // 点按说话时没声音多久自动结束（毫秒，#285），0 不自动结束（再点一下语音键结束，最长录 2 分钟）。
+    // WowType 设置里是「停顿多久自动结束」的下拉框（1.5、3、5、10、30 秒、不自动结束）
+    fcitx::Option<int, fcitx::IntConstrain> voiceSilenceTimeout{
+        this, "VoiceSilenceTimeout", "停顿多久自动结束（点按说话，毫秒；0 不自动结束）", 1500,
+        fcitx::IntConstrain(0, 60000)};
     fcitx::Option<bool> voiceCopy{this, "VoiceCopy", "语音识别的结果同时复制到剪贴板", false};
     fcitx::Option<bool> emojiSuggest{this, "EmojiSuggest", "打字时推荐 emoji", true};
     fcitx::Option<fcitx::Key, fcitx::KeyConstrain> emojiKey{
@@ -304,7 +327,10 @@ FCITX_CONFIGURATION(
     fcitx::Option<std::string> translateModel{this, "TranslateModel", "翻译用的模型", ""};
     fcitx::Option<bool> translateFormal{this, "TranslateFormal", "译文用正式语气（默认聊天口吻）",
                                         false};
-    // 本地模型（腾讯 HY-MT 1.5 1.8B）：第一次翻译时起 llama-server，闲置后停掉。
+    // 互译只翻一句（#191），默认关：关着时 Shift 照旧 中 → 英 → 译 → 中，双击 Shift 不切换
+    fcitx::Option<bool> translateOneShot{
+        this, "TranslateOneShot", "双击 Shift 单次互译（单按 Shift 只切中英，翻完一句自动回来）", false};
+    // 本地模型（腾讯混元 Hy-MT3 1.8B）：第一次翻译时起 llama-server，闲置后停掉。
     // 默认用本地模型；旧配置文件里没写这一项时见 loadWowtypeConfig
     fcitx::Option<bool> translateLocal{this, "TranslateLocal", "用本地模型翻译（HY-MT，离线）",
                                        true};
@@ -375,6 +401,7 @@ inline void loadWowtypeConfig(WowtypeConfig &config, const fcitx::RawConfig &fil
     // 范围和上面 IntConstrain 的一样；不一样时契约测试（PageSize=12 读成 9）会报错
     clampWowtypeInt(config.pageSize, raw, 3, 9);
     clampWowtypeInt(config.translateIdleMinutes, raw, 0, 240);
+    clampWowtypeInt(config.voiceSilenceTimeout, raw, 0, 60000);
     if (!raw.valueByPath("TranslateLocal") &&
         (*config.translateBaseUrl).find_first_not_of(" \t\r\n") != std::string::npos) {
         config.translateLocal.setValue(false);
@@ -450,6 +477,11 @@ public:
     /// 句首词候选先压进已选栈，剩下的拼音继续输入。
     void commitCandidate(fcitx::InputContext *ic, WowtypeState *state,
                          std::size_t index);
+    /// 候选上点右键（#229）：第 index 个候选（全局下标）是学过的词，菜单里给「忘掉这个词」。
+    bool canForgetCandidate(WowtypeState *state, std::size_t index) const;
+    /// 右键菜单的「忘掉这个词」：忘掉第 index 个候选（全局下标），和光标在它上面按 Ctrl+Delete 一样，
+    /// 忘掉了马上存，照会话重画（编辑区、页码、光标不动）。
+    void forgetCandidate(fcitx::InputContext *ic, WowtypeState *state, std::size_t index);
     /// 点了工具栏 / 表情面板的第 index 项（会话做：菜单进下一层，别的上屏）。
     void choosePanelItem(fcitx::InputContext *ic, WowtypeState *state, std::size_t index);
     /// 展开的候选面板里点了第 row 行：光标在这行就选光标处的词，否则选这行第一个。
@@ -534,6 +566,19 @@ private:
     void fillToolPanel(fcitx::InputContext *ic, WowtypeState *state);
     /// 剪贴板历史：从 fcitx5 的 clipboard 插件拿最新一条交给核心（没有这个插件就什么都不做）。
     void sampleClipboard(fcitx::InputContext *ic);
+    /// fcitx5 的 clipboard 插件里最新的一条（还没复制过东西是空串）；现在读不了——密码框里、
+    /// 没有输入框、没有这个插件——是 nullopt。
+    std::optional<std::string> latestClipboard(fcitx::InputContext *ic);
+
+    // 跨设备复制粘贴
+    /// 配对文件（设备编号、组密钥），WowType 设置配对时写。
+    std::string syncStateFile() const;
+    /// 放中转服务访问口令的文件。
+    std::string syncRelayKeyFile() const;
+    /// 照设置起停同步（applyConfig 里调）。
+    void applySync();
+    /// 每秒一次：把本机剪贴板交给核心，取别的设备复制过来的。
+    void tickSync();
 
 public:
 
@@ -589,8 +634,25 @@ private:
     /// done：识别完了（语音浮条显示「识别完成」再淡出），否则直接收起。
     void clearVoice(bool done = false);
     void cancelVoice();
-    /// GNOME 下由 WowType 扩展画语音浮条：插件经 D-Bus 把状态发给它。
-    void setupVoiceOverlay();
+    /// GNOME 下由 WowType 扩展画语音浮条、展开面板的网格：插件经 D-Bus 把状态发给它。
+    void setupOverlays();
+    /// 展开面板的网格（#270）：盯着扩展登记的名字，收回执和鼠标点的格子。
+    void setupGridOverlay();
+    /// 扩展在跑、而且没被认定画不出来：展开面板交给扩展画网格，kimpanel 只拿到一个空列表。
+    bool gridOverlay() const { return overlayBus_ && !gridOwner_.empty() && !gridBroken_; }
+    /// 把展开面板这一屏的格子发给扩展；header 是本来画在 kimpanel 上的提示和编辑区。
+    void sendGridOverlay(fcitx::InputContext *ic, WowtypeState *state, const std::string &header);
+    /// 让扩展收起网格（不再显示展开面板了）。
+    void hideGridOverlay();
+    /// 发出去的网格过了 kGridAckUsec 还没有回执：认定扩展画不出来，退回 kimpanel 画的列表。
+    void checkGridAck();
+    /// 扩展上点了一个格子（serial 是那一屏的编号，index 是全局下标）。
+    void selectGridCell(uint32_t serial, uint32_t index);
+    /// 扩展上右键点了一格、选了「忘掉这个词」（#229）。
+    void forgetGridCell(uint32_t serial, uint32_t index);
+    void pageGrid(uint32_t serial, int32_t delta);
+    /// 输入框换了面板（收起、上屏、失去焦点）：网格跟着收起。
+    void onGridUiEvent(fcitx::Event &event);
     /// 在会话总线上登记 org.wowtype.Input（外部命令切模式）。
     void setupControl();
     /// 扩展在跑、而且没被认定画不出来（#170）：语音提示交给浮条。
@@ -630,6 +692,7 @@ private:
     unsigned fuzzyGroups_ = 0;
     bool typo_ = true;
     bool rareExt_ = false;
+    bool inlineSpace_ = false; // InlineSpaceSeparator：输入框里的拼音用空格分音节（#247）
     WowtypeSelectKeys selectKeys_ = WowtypeSelectKeys::Off;
     bool pickChar_ = true;
     bool association_ = false;
@@ -637,6 +700,12 @@ private:
     bool calculator_ = true;
     bool toolbar_ = true;
     bool clipboardHistory_ = false;
+    /// 跨设备复制粘贴（核心没带 sync 特性时一直是 nullptr）
+    WowtypeSync *sync_ = nullptr;
+    bool syncEnabled_ = false;
+    /// 收到的也放进系统剪贴板
+    bool syncPaste_ = true;
+    std::unique_ptr<fcitx::EventSourceTime> syncTimer_;
     /// 双拼时编辑区显示打的键（#122）
     bool shuangpinShowKeys_ = false;
     /// 双拼的简拼：每个键都是声母时也当简拼（sm -> 什么，#268）
@@ -757,6 +826,25 @@ private:
     uint64_t overlaySentAt_ = 0;
     bool overlayAcked_ = false;
     bool overlayBroken_ = false;
+
+    // 展开面板的网格（GNOME 扩展画，#270），和语音浮条共用 overlayBus_。
+    // 每发一屏 serial 加一，扩展画好了回 Ack(serial)；最早一个没回执的发出去的时刻是 gridPendingSince_，
+    // 等不到就把 gridBroken_ 置上、退回 kimpanel 的列表；之后迟到的回执（扩展只是慢）再把它清掉。
+    std::unique_ptr<fcitx::dbus::ServiceWatcherEntry> gridWatch_;
+    std::unique_ptr<fcitx::dbus::Slot> gridAckSlot_;
+    std::unique_ptr<fcitx::dbus::Slot> gridSelectSlot_;
+    std::unique_ptr<fcitx::dbus::Slot> gridForgetSlot_;
+    std::unique_ptr<fcitx::dbus::Slot> gridPageSlot_;
+    std::string gridOwner_;
+    uint32_t gridSerial_ = 0;
+    uint32_t gridAckedSerial_ = 0;
+    uint64_t gridPendingSince_ = 0;
+    bool gridBroken_ = false;
+    /// 网格现在画在哪个输入框上（空：没在显示）。
+    fcitx::TrackableObjectReference<fcitx::InputContext> gridIc_;
+    std::unique_ptr<fcitx::EventSourceTime> gridAckTimer_;
+    std::vector<std::unique_ptr<fcitx::HandlerTableEntry<std::function<void(fcitx::Event &)>>>>
+        gridEventWatchers_;
 
     // 外部命令切模式：单独一条会话总线连接。control_ 要先于总线析构，所以排在后面
     std::unique_ptr<fcitx::dbus::Bus> controlBus_;

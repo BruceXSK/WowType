@@ -53,8 +53,9 @@ pub const MODEL_MISSING: c_int = 5;
 /// 没有模型时按热键显示的提示。
 const MISSING_HINT: &str = "没有语音模型，请在「WowType 设置 → 语音」里下载";
 
-/// 单次最长录音。和 SenseVoice 那套一样，误触不会一直录下去。
-const MAX_RECORDING: Duration = Duration::from_secs(120);
+/// 单次最长录音，到了照常出结果、上屏。和 SenseVoice 那套一样，误触不会一直录下去；
+/// 点按说话设成「不自动结束」（静音超时 0）时也靠它收尾，设置界面的说明里写着「一次最长录 2 分钟」。
+pub(crate) const MAX_RECORDING: Duration = Duration::from_secs(120);
 /// 等模型加载的上限（已下载好、只是还在读进内存）。
 const LOAD_WAIT: Duration = Duration::from_secs(60);
 
@@ -199,6 +200,8 @@ pub struct WowtypeVoice {
     model: Arc<ModelSlot>,
     shared: Arc<Mutex<Shared>>,
     trigger: VoiceTrigger,
+    /// 热键状态机的设置（静音超时）；状态机复位时照它重建
+    trigger_cfg: TriggerConfig,
     session: u64,
     tx: Option<Sender<Msg>>,
     text: CString,
@@ -221,10 +224,19 @@ impl WowtypeVoice {
                 level: 0,
             })),
             trigger: VoiceTrigger::new(TriggerConfig::default()),
+            trigger_cfg: TriggerConfig::default(),
             session: 0,
             tx: None,
             text: CString::default(),
         }
+    }
+
+    /// 点按说话时没声音多久自动结束，毫秒；0 是不自动结束（再按一次热键结束，最长 MAX_RECORDING）。
+    /// 正在听时改了也马上按新的算。
+    fn set_silence_timeout(&mut self, ms: u32) {
+        let timeout = TriggerConfig::silence_from_ms(u64::from(ms));
+        self.trigger_cfg.silence_timeout = timeout;
+        self.trigger.set_silence_timeout(timeout);
     }
 
     fn apply(&mut self, actions: Vec<Action>) {
@@ -293,7 +305,7 @@ impl WowtypeVoice {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(Msg::Cancel);
         }
-        self.trigger = VoiceTrigger::new(TriggerConfig::default());
+        self.trigger = VoiceTrigger::new(self.trigger_cfg);
         self.session += 1;
         let mut shared = self.shared.lock().unwrap();
         shared.session = self.session;
@@ -321,7 +333,7 @@ impl WowtypeVoice {
         }
         // 工作线程自己停了（到了时长上限、开不了麦克风）：热键状态机跟着复位
         if phase != VOICE_LISTENING && self.trigger.is_recording() {
-            self.trigger = VoiceTrigger::new(TriggerConfig::default());
+            self.trigger = VoiceTrigger::new(self.trigger_cfg);
             self.tx = None;
         }
         if phase == VOICE_RESULT || phase == VOICE_ERROR {
@@ -553,7 +565,8 @@ pub unsafe extern "C" fn wowtype_voice_key_down(voice: *mut WowtypeVoice) {
     }
 }
 
-/// 热键松开。按住超过 300ms 算长按，松开即结束；更短算点按，继续听到说完（静音 1.5 秒）或再按一次。
+/// 热键松开。按住超过 300ms 算长按，松开即结束；更短算点按，继续听到说完（静音超时，默认 1.5 秒，
+/// 见 wowtype_voice_set_silence_timeout）或再按一次。
 #[no_mangle]
 pub unsafe extern "C" fn wowtype_voice_key_up(voice: *mut WowtypeVoice) {
     if let Some(voice) = unsafe { voice.as_mut() } {
@@ -616,6 +629,15 @@ pub unsafe extern "C" fn wowtype_voice_is_tap(voice: *const WowtypeVoice) -> c_i
     }
 }
 
+/// 点按说话时没声音多久自动结束，毫秒（ABI 1.16）。默认 1500；0 是不因静音结束，只有再按一次热键
+/// （或 cancel、到了单次最长录音 2 分钟）才结束。长按说话不受影响。正在听时改了也马上生效。
+#[no_mangle]
+pub unsafe extern "C" fn wowtype_voice_set_silence_timeout(voice: *mut WowtypeVoice, ms: u32) {
+    if let Some(voice) = unsafe { voice.as_mut() } {
+        voice.set_silence_timeout(ms);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,5 +695,30 @@ mod tests {
         assert_eq!(voice.model.code(), MODEL_FAILED);
         let hint = voice.model.unavailable_hint();
         assert!(hint.contains("开不了载入线程") && !hint.contains("下载"), "{hint}");
+    }
+
+    #[test]
+    fn silence_timeout_survives_reset() {
+        let dir =
+            std::env::temp_dir().join(format!("wowtype-voice-silence-{}", std::process::id()));
+        let mut voice = WowtypeVoice::new(dir);
+        assert_eq!(
+            voice.trigger.config().silence_timeout,
+            Some(Duration::from_millis(1500))
+        );
+        unsafe { wowtype_voice_set_silence_timeout(&mut voice, 0) };
+        assert_eq!(voice.trigger.config().silence_timeout, None);
+        // 取消、工作线程自己停了时状态机重建：设置还在
+        voice.cancel();
+        assert_eq!(voice.trigger.config().silence_timeout, None);
+        unsafe { wowtype_voice_set_silence_timeout(&mut voice, 5000) };
+        voice.cancel();
+        assert_eq!(
+            voice.trigger.config().silence_timeout,
+            Some(Duration::from_secs(5))
+        );
+        // NULL 不崩
+        unsafe { wowtype_voice_set_silence_timeout(std::ptr::null_mut(), 3000) };
+        assert_eq!(MAX_RECORDING, Duration::from_secs(120));
     }
 }

@@ -6,6 +6,7 @@
 //   wowtype-windows-config-dump --look              设置窗口的主题、强调色：{"themes": [...], "accents": [...]}
 //   wowtype-windows-config-dump --translate         「翻译引擎」的选项和哔哩哔哩的地址、模型：{"engines": [...], "bilibili": {...}}
 //   wowtype-windows-config-dump --engine k=v ...    这几行当 wowtype.conf 读出来时选中的引擎：{"engine": "local"}
+//   wowtype-windows-config-dump --voice             「停顿多久自动结束」的名字、说明、选项：{"silenceTitle": ..., "silenceChoices": [...]}
 
 #include <cstdio>
 #include <fstream>
@@ -131,6 +132,17 @@ int main(int argc, char **argv) {
             out += std::string(i ? ", " : "") + "{\"id\": " + json(m.id) + ", \"name\": " + json(m.name) + "}";
         }
         std::printf("%s]}}\n", out.c_str());
+        return 0;
+    }
+    if (mode == "--voice") {
+        std::string out = "{\"silenceTitle\": " + json(kVoiceSilenceTitle) + ", \"silenceInfo\": " +
+                          json(kVoiceSilenceInfo) + ", \"silenceChoices\": [";
+        for (std::size_t i = 0; i < voiceSilenceChoices().size(); ++i) {
+            const auto &c = voiceSilenceChoices()[i];
+            out += std::string(i ? ", " : "") + "{\"value\": " + std::to_string(c.value) + ", \"name\": " +
+                   json(c.name) + "}";
+        }
+        std::printf("%s]}\n", out.c_str());
         return 0;
     }
     if (mode == "--engine") {

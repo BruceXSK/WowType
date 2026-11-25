@@ -142,6 +142,21 @@ do {
 }
 
 do {
+    // InlineSpaceSeparator（#247）：输入框里音节用空格分，光标位置不变；默认关，照旧 '
+    var config = WowtypeConfig()
+    config.inlineSpaceSeparator = true
+    let (c, client) = fresh()
+    c.apply(config)
+    type(c, "nihao")
+    check(client.marked == "ni hao" && client.markedCursor == client.marked.utf16.count,
+          "打开 InlineSpaceSeparator：输入框里是 ni hao", client.marked)
+    _ = c.handle(.key(Keysym.escape))
+    type(c, "xi'an")
+    // 后面怎么切看词库（测试词库小，an 可能切成 a'n），这里只看输入框里没有 '
+    check(client.marked.hasPrefix("xi ") && !client.marked.contains("'"), "手动分隔的 xi'an：输入框里没有 '", client.marked)
+}
+
+do {
     let (c, client) = fresh()
     type(c, "shi")
     let texts = client.page?.texts ?? []
@@ -529,6 +544,49 @@ do {
     check(!c.handle(.key(Keysym.backspace, .control)), "没在打字时 Control+Delete 交给应用")
 }
 
+do {
+    // 候选上点右键「忘掉这个词」（#229）：学过的词才有，按显示的序号忘，光标不挪
+    check(Composer.forgetMenuTitle == "忘掉这个词", "右键菜单的字样")
+    let (c, client) = fresh()
+    var forgets = 0
+    c.onForget = { forgets += 1 }
+    for _ in 0..<2 {
+        type(c, "nihao")
+        if let ni = client.page?.texts.firstIndex(of: "尼") {
+            c.select(ni)
+            if let hao = client.page?.texts.firstIndex(of: "号") {
+                c.select(hao)
+            }
+        }
+    }
+    client.committed = ""
+    type(c, "nihao")
+    let learned = client.page?.texts ?? []
+    let at = learned.firstIndex(of: "尼号")
+    let cursor = client.page?.cursor
+    check(at.map { c.canForget($0) } == true, "学会的 尼号 能忘", "\(learned)")
+    check(!c.canForget(learned.count) && !c.canForget(-1), "越界的不能忘")
+    let plain = learned.indices.first { !c.canForget($0) }
+    check(plain != nil, "没学过的词不给「忘掉这个词」", "\(learned)")
+    if let plain {
+        c.forget(plain)
+        check(forgets == 0 && client.page?.texts == learned, "没学过的忘了也什么都不做")
+    }
+    let marked = client.marked
+    if let at {
+        c.forget(at)
+    }
+    check(forgets == 1 && client.committed.isEmpty && client.marked == marked && c.input == "nihao"
+          && client.page?.cursor == cursor,
+          "右键忘掉以后马上存，编辑区、光标不动", "\(forgets) \(client.committed) \(client.marked)")
+    let after = client.page?.texts ?? []
+    check((after.firstIndex(of: "尼号") ?? Int.max) > (at ?? 0), "忘掉以后 尼号 不再排在原来的位置",
+          "\(learned) -> \(after)")
+    check(after.firstIndex(of: "尼号").map { !c.canForget($0) } ?? true, "忘掉以后不再能忘")
+    _ = c.handle(.key(Keysym.escape))
+    check(!c.canForget(0), "没在打字时没有右键菜单")
+}
+
 // MARK: 设置（wowtype.conf）
 
 /// 照设置配好引擎和会话；测完把引擎改回默认（所有测试共用一个引擎）。
@@ -897,12 +955,15 @@ do {
     all.toggleKey = Shortcut(name: "Control+space")
     all.translateModeKey = Shortcut(name: "Control+Shift+Y")
     all.voiceKey = "F8"
+    all.voiceSilenceTimeout = 0
     all.translateTarget = "ja"
     all.translateBaseUrl = "http://127.0.0.1:11434/v1"
     all.translateModel = "qwen 2.5"
     all.translateLocalModel = "/Users/me/模型/HY-MT.gguf"
     all.translateLlamaServer = "/opt/homebrew/bin/llama-server"
     all.translateIdleMinutes = 30
+    all.clipboardSyncRelayUrl = "https://relay.example.workers.dev"
+    all.clipboardSyncDeviceName = "书房的 Mac"
     all.initialMode = .last
     all.windowMode = .english
     all.settingsTheme = .dark
@@ -1631,6 +1692,82 @@ do {
     check(same.c.handle(y) && same.c.mode == .translate, "同一个键：再按进「译」")
 }
 
+/// 在 at 秒双击 Shift（两下隔 0.25 秒），返回第二下切没切模式。
+func doubleTapShift(_ c: Composer, at: Double) -> Bool {
+    _ = c.shiftChanged(down: true, otherModifiers: false, now: at)
+    _ = c.shiftChanged(down: false, otherModifiers: false, now: at + 0.08)
+    _ = c.shiftChanged(down: true, otherModifiers: false, now: at + 0.25)
+    return c.shiftChanged(down: false, otherModifiers: false, now: at + 0.33)
+}
+
+do {
+    // #191：互译只翻一句（TranslateOneShot），和 Linux、Windows 一样
+    check(!WowtypeConfig().translateOneShot, "默认不开单次互译")
+    check(WowtypeConfig.parse("TranslateOneShot=True").translateOneShot, "读出单次互译")
+    check(WowtypeConfig.template().contains("TranslateOneShot=False"), "模板里有单次互译")
+    let r = translateRig { $0.translateOneShot = true }
+    var seen: [String] = []
+    r.c.onCommitStats = { text, source, _, index in seen.append("\(text)|\(source)|\(index)") }
+    r.c.switchMode(to: .chinese)
+    // 单按只在中英之间切
+    tapShift(r.c)
+    check(r.c.mode == .english, "单次互译：单按 Shift 到英文")
+    tapShift(r.c)
+    check(r.c.mode == .chinese, "单次互译：再单按回中文，不经过「译」")
+    tapShift(r.c)
+    // 英文里双击进「译」，译文上屏后回到英文
+    r.clock.now = shiftClock + 10
+    check(doubleTapShift(r.c, at: r.clock.now) && r.c.mode == .translate, "英文里双击 Shift 进「译」", "\(r.c.mode)")
+    r.tick(1)
+    check(r.c.mode == .translate, "过了双击间隔也不再切")
+    type(r.c, "nihao ")
+    check(r.tick(0.6) && r.t.started == ["你好"], "停够 0.5 秒发请求", "\(r.t.started)")
+    r.t.finish("Hello")
+    check(r.c.handle(.key(Keysym.returnKey)) && r.client.committed == "Hello" && r.c.mode == .english,
+          "回车上屏译文，回到英文", "\(r.client.committed) \(r.c.mode)")
+    check(seen == ["Hello|translate|0"], "译文照「译」记统计", "\(seen)")
+    // 没译好就按回车：轮询里上屏、回去
+    r.client.committed = ""
+    r.clock.now += 10
+    check(doubleTapShift(r.c, at: r.clock.now) && r.c.mode == .translate, "又双击进「译」")
+    type(r.c, "shijie ")
+    let source = r.c.translateSource
+    _ = r.c.handle(.key(Keysym.returnKey))
+    check(r.client.committed.isEmpty && r.c.mode == .translate, "没译好先等着")
+    r.t.finish("World")
+    r.tick()
+    check(r.client.committed == "World" && r.c.mode == .english && !source.isEmpty, "译好了轮询里上屏，回到英文",
+          "\(r.client.committed) \(r.c.mode)")
+    // Esc 放弃
+    r.clock.now += 10
+    _ = doubleTapShift(r.c, at: r.clock.now)
+    type(r.c, "nihao ")
+    check(r.c.handle(.key(Keysym.escape)) && r.c.mode == .english && r.c.translateSource.isEmpty,
+          "Esc 放弃，回到英文")
+    // 打到一半双击：拼音带进「译」；单按放弃：原文原样上屏，回到中文
+    r.c.switchMode(to: .chinese)
+    r.client.committed = ""
+    type(r.c, "ni")
+    r.clock.now += 10
+    check(doubleTapShift(r.c, at: r.clock.now) && r.c.mode == .translate && r.c.input == "ni" && r.client.committed.isEmpty,
+          "打到一半双击：拼音带进「译」", r.c.input)
+    type(r.c, "hao ")
+    tapShift(r.c)
+    check(r.c.mode == .chinese && r.client.committed == "你好", "「译」里单按 Shift：原文原样上屏，回到中文",
+          "\(r.client.committed) \(r.c.mode)")
+
+    // 关着：双击两下都不算（#253），单按照旧 中 → 英 → 译
+    let off = translateRig()
+    off.c.switchMode(to: .chinese)
+    off.clock.now = shiftClock + 10
+    check(!doubleTapShift(off.c, at: off.clock.now) && off.c.mode == .chinese, "关着：双击 Shift 不切")
+    off.tick(1)
+    check(off.c.mode == .chinese, "关着：过了间隔也不切")
+    tapShift(off.c)
+    tapShift(off.c)
+    check(off.c.mode == .translate, "关着：单按照旧切到「译」")
+}
+
 withConfig({ $0.shiftToggle = .off; $0.translateModeKey = Shortcut(name: "Control+Shift+Y") }) { c, _ in
     // 关了 Shift、只设了互译键：英文回不来，换设置时拉回中文（互译键只进出「译」）
     c.switchMode(to: .english)
@@ -2016,6 +2153,94 @@ if !haveCurl() {
     check(false, "起假翻译服务")
 }
 
+// MARK: 跨设备复制粘贴（核心的 wowtype_sync_* 上面那层 Swift 封装）
+
+do {
+    let dir = "/tmp/wowtype-sync-test-\(getpid())"
+    mkdir(dir, 0o700)
+    let (stateA, stateB) = (dir + "/a.json", dir + "/b.json")
+    defer {
+        for name in ["a.json", "b.json", "relay.key"] { unlink(dir + "/" + name) }
+        rmdir(dir)
+    }
+    /// 等到 probe 为真，最多 seconds 秒
+    func waitFor(_ seconds: Int, _ probe: () -> Bool) -> Bool {
+        for _ in 0..<(seconds * 50) where !probe() { usleep(20_000) }
+        return probe()
+    }
+
+    var config = WowtypeConfig()
+    check(!config.clipboardSync && config.clipboardSyncLan && config.clipboardSyncPaste
+          && config.clipboardSyncRelayUrl.isEmpty && config.clipboardSyncDeviceName.isEmpty,
+          "跨设备复制粘贴默认关，局域网直连和放进系统剪贴板默认开")
+    check(SyncFiles.normalize(code: " 123 456 ") == "123456" && SyncFiles.normalize(code: "123-456") == "123456"
+          && SyncFiles.normalize(code: "12345") == nil && SyncFiles.normalize(code: "１２３４５６") == nil
+          && SyncFiles.normalize(code: "12345a") == nil, "配对码只认 6 位数字，空格、短横去掉")
+    check(SyncFiles.spaced("123456") == "123 456" && SyncFiles.spaced("12") == "12", "配对码显示成 123 456")
+    let none = SyncFiles.devices(stateFile: stateA)
+    check(!none.paired && none.names.isEmpty, "没有配对文件是还没配对")
+
+    // 输入法里的那一份：没打开不建，打开了没配对也不发
+    let sync = ClipboardSync()
+    sync.configure(config, stateFile: stateA, relayKeyFile: dir + "/relay.key", hostName: "测试机")
+    check(sync.status == nil && !sync.observe("a") && sync.poll() == nil, "没打开过：不建、不起线程")
+    config.clipboardSync = true
+    sync.configure(config, stateFile: stateA, relayKeyFile: dir + "/relay.key", hostName: "测试机")
+    check(waitFor(10) { sync.status?["enabled"] as? Bool == true }, "打开以后核心跟上", "\(String(describing: sync.status))")
+    check(sync.status?["paired"] as? Bool == false && sync.status?["relay"] as? String == "off",
+          "还没配对、没填中转服务", "\(String(describing: sync.status))")
+    check(!sync.observe("原有的") && !sync.observe("新复制的"), "没配对不发")
+    sync.touch()
+
+    // 配对：甲显示配对码，乙输入。取消的不留痕迹
+    let host = SyncPairSettings(stateFile: stateA, deviceName: "甲", lan: true, relayUrl: "", relayKeyFile: "")
+    let guest = SyncPairSettings(stateFile: stateB, deviceName: "乙", lan: true, relayUrl: "", relayKeyFile: "")
+    func codeOf(_ pairing: SyncPairing) -> String? {
+        _ = waitFor(10) { pairing.state != .starting }
+        if case .waiting(let code) = pairing.state { return code }
+        return nil
+    }
+    var hosting: SyncPairing? = SyncPairing(host: host)
+    let first = hosting.flatMap(codeOf)
+    check(first.map { $0.count == 6 && SyncFiles.normalize(code: $0) == $0 } == true, "主持：出 6 位配对码",
+          "\(String(describing: hosting?.state))")
+    hosting = nil
+    usleep(400_000)
+    check(!SyncFiles.devices(stateFile: stateA).paired, "取消配对码不留下组密钥")
+
+    hosting = SyncPairing(host: host)
+    if let pairing = hosting, let code = codeOf(pairing) {
+        let joining = SyncPairing(join: guest, code: code)
+        _ = waitFor(40) { joining.state != .starting }
+        if case .failed(let reason) = joining.state, reason.contains("没找到") {
+            // 没有能广播的网卡（有的 CI 容器）：真配对这一步跳过，核心自己的测试里有
+            print("skip 跨设备复制粘贴：这台机器上广播收不到自己（\(reason)）")
+        } else {
+            check(joining.state == .done(device: "甲"), "加入：配上了，对方叫甲", "\(joining.state)")
+            check(waitFor(10) { pairing.state == .done(device: "乙") }, "主持：配上了，对方叫乙", "\(pairing.state)")
+            let (a, b) = (SyncFiles.devices(stateFile: stateA), SyncFiles.devices(stateFile: stateB))
+            check(a.paired && a.names == ["乙"] && b.paired && b.names == ["甲"], "两边的配对文件都记下了对方", "\(a) \(b)")
+            // 输入法那一份盯着配对文件：配好了自己起来
+            check(waitFor(15) { sync.status?["paired"] as? Bool == true }, "配好对以后输入法那边自己跟上",
+                  "\(String(describing: sync.status))")
+            check(SyncFiles.unpair(stateFile: stateB) && !SyncFiles.devices(stateFile: stateB).paired
+                  && SyncFiles.devices(stateFile: stateA).paired, "取消配对只动自己")
+        }
+    } else {
+        check(false, "主持：第二次也出配对码", "\(String(describing: hosting?.state))")
+    }
+    hosting = nil
+
+    let bad = SyncPairing(join: guest, code: "12")
+    check(waitFor(10) { bad.state == .failed(reason: "配对码是 6 位数字") }, "配对码不对：说得出原因", "\(bad.state)")
+    check(SyncFiles.ping(relayUrl: "", relayKeyFile: "") == "还没有填中转服务的地址"
+          && SyncFiles.ping(relayUrl: "https://relay.example.com", relayKeyFile: dir + "/没有") == "还没有填中转服务的访问口令",
+          "测试中转服务：没填地址、没有口令都不联网就说得出原因")
+    writeFile(dir + "/relay.key", "token\n")
+    check(SyncFiles.ping(relayUrl: "http://relay.example.com", relayKeyFile: dir + "/relay.key")?.contains("https://") == true,
+          "中转服务的地址要 https")
+}
+
 // MARK: 本地翻译模型（和 Linux 设置的 download_model / install_llama_server 一样）
 
 do {
@@ -2030,15 +2255,17 @@ do {
     check(LocalModel.llamaAsset(machine: "arm64", os: (13, 2)) == nil && LocalModel.llamaAsset(machine: "x86_64", os: (12, 7)) == nil,
           "macOS 13.3 以下没有能下载的 llama-server")
     check(LocalModel.llamaAsset(machine: "ppc", os: (26, 0)) == nil, "不认识的 CPU 没有")
-    check(LocalModel.size == 1_133_080_512 && LocalModel.sha256.count == 64 && LocalModel.url.hasSuffix("/" + LocalModel.fileName),
+    check(LocalModel.size == 1_348_432_160 && LocalModel.sha256.count == 64 && LocalModel.url.hasSuffix("/" + LocalModel.fileName),
           "模型钉了大小和 SHA256")
     // 和 Linux 设置钉的是同一个模型、同一个 llama.cpp 构建（规格目录旁边就是 settings/）
     let specDir = getenv("WOWTYPE_SPEC_DIR").map { String(cString: $0) } ?? "spec"
     if let linux = readFile(specDir + "/../settings/wowtype-config") {
         check(linux.contains("\"\(LocalModel.sha256)\"") && linux.contains("LOCAL_MODEL_SIZE = \(LocalModel.size)")
               && linux.contains("LOCAL_MODEL_FILE = \"\(LocalModel.fileName)\"")
+              && linux.contains("LEGACY_MODEL_FILE = \"\(LocalModel.legacyFileName)\"")
+              && linux.contains("LEGACY_MODEL_NAME = \"\(LocalModel.legacyName)\"")
               && linux.contains("LLAMA_BUILD = \"\(LocalModel.llamaBuild)\""),
-              "模型的 SHA256、大小和 llama.cpp 构建号和 Linux 的 wowtype-config 一样")
+              "模型的 SHA256、大小、上一代的文件名和 llama.cpp 构建号和 Linux 的 wowtype-config 一样")
     } else {
         print("skip 对照 Linux 的模型校验值（没找到 settings/wowtype-config）")
     }
@@ -2067,8 +2294,26 @@ do {
     check(!LocalModel.plan(modelExists: true, serverFound: true, customServer: true, asset: arm, serverOutdated: true).wantLlama,
           "自己写了 llama-server 的位置：不管构建号")
 
+    // 上一代模型（HY-MT 1.5）：新的没下载时照旧用它，另给「升级」；自己写了位置、新的下好了都不算
+    let dir = "/data/models/"
+    let wanted = dir + LocalModel.fileName, legacyFile = dir + LocalModel.legacyFileName
+    check(LocalModel.legacyPath(defaultModel: wanted) { $0 == legacyFile } == legacyFile, "只有上一代的模型：用它")
+    check(LocalModel.legacyPath(defaultModel: wanted) { _ in true } == nil, "新的下好了：不看上一代的")
+    check(LocalModel.legacyPath(defaultModel: wanted) { _ in false } == nil, "都没有：没有上一代的")
+    check(LocalModel.legacyPath(defaultModel: dir + "mine.gguf") { $0 == legacyFile } == nil, "不是默认文件名的不替它找")
+    let aging = LocalModel.plan(modelExists: true, serverFound: true, customServer: false, asset: arm, legacy: true)
+    check(aging.ready && aging.legacy && aging.canUpgrade && !aging.canDownload, "上一代模型：已就绪，可以升级", "\(aging)")
+    let agingNoServer = LocalModel.plan(modelExists: true, serverFound: false, customServer: false, asset: arm, legacy: true)
+    check(agingNoServer.canDownload && !agingNoServer.canUpgrade && agingNoServer.bytes == 16_650_691,
+          "上一代模型还差 llama-server：先补 llama-server", "\(agingNoServer)")
+    check(!LocalModel.plan(modelExists: false, serverFound: true, customServer: false, asset: arm, legacy: true).legacy
+          && !LocalModel.plan(modelExists: true, serverFound: true, customServer: false, asset: arm).canUpgrade,
+          "没有模型、或者已经是新模型：没有升级")
+    let up = LocalModel.upgradePlan
+    check(up.wantModel && !up.wantLlama && up.canDownload && up.bytes == LocalModel.size, "升级只下新模型", "\(up)")
+
     // 和 Linux 设置的 human_size 一样：f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB"
-    check(LocalModel.sizeText(LocalModel.size + 16_650_691) == "1.15 GB", "大小写成 1.15 GB（和 Linux 一样）",
+    check(LocalModel.sizeText(LocalModel.size + 16_650_691) == "1.37 GB", "大小写成 1.37 GB（和 Linux 一样）",
           LocalModel.sizeText(LocalModel.size + 16_650_691))
     check(LocalModel.sizeText(16_650_691) == "17 MB" && LocalModel.sizeText(1_950_000_000) == "1.95 GB"
           && LocalModel.sizeText(2_004_000_000) == "2.00 GB" && LocalModel.sizeText(1_133_080_512) == "1.13 GB",
@@ -2119,7 +2364,11 @@ do {
     check(VoiceKey(name: "Menu") == nil && VoiceKey(name: "") == nil && VoiceKey(name: "none") == nil,
           "Mac 上没有的键、留空：不用语音键")
     let c = WowtypeConfig.parse("Voice=False\nVoiceKey=F9\nVoiceCopy=True")
-    check(!c.voice && c.voiceKey == "F9" && c.voiceCopy, "读语音设置")
+    check(!c.voice && c.voiceKey == "F9" && c.voiceCopy && c.voiceSilenceTimeout == 1500, "读语音设置")
+    check(WowtypeConfig.parse("VoiceSilenceTimeout=0").voiceSilenceTimeout == 0
+              && WowtypeConfig.parse("VoiceSilenceTimeout=10000").voiceSilenceTimeout == 10000
+              && WowtypeConfig.parse("VoiceSilenceTimeout=999999").voiceSilenceTimeout == 60000,
+          "读停顿多久自动结束（0 不自动结束，超出夹到 60000）")
     check(voiceWave([]) == "▁▁▁▁▁▁" && voiceWave([100, 0]) == "▁▁▁▁█▁"
           && voiceWave([0, 10, 20, 30, 40, 50, 60]).count == 6, "音量画成 6 个竖条（和 Linux 一样）")
 }

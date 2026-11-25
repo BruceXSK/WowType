@@ -27,7 +27,8 @@ Rust 核心负责音节图、束搜索、词典/LM 打分和排序；C++ 只负�
 [安装说明](../docs/INSTALL.md)。
 
 5.1 以后才有的接口按版本判断：5.1.11 起才有自定义的中 / 英提示气泡（`WOWTYPE_HAVE_CUSTOM_IM_INFO`），
-更早的显示 Fcitx 5 默认的输入法提示。插件清单（`wowtype-addon.conf`）里要求的 fcitx5 版本是编译时版本的「主.次.0」（5.1.x 上编的写 5.1.0）。
+更早的显示 Fcitx 5 默认的输入法提示；5.1.10 起候选上点右键有「忘掉这个词」（`WOWTYPE_HAVE_CANDIDATE_ACTIONS`，
+经典界面画菜单，GNOME 的 kimpanel 不画，展开面板交给 WowType 的 GNOME 扩展画时扩展自己出菜单），更早的只能按 Ctrl+Delete。插件清单（`wowtype-addon.conf`）里要求的 fcitx5 版本是编译时版本的「主.次.0」（5.1.x 上编的写 5.1.0）。
 
 在仓库根目录构建并安装：
 
@@ -186,6 +187,8 @@ bigram 格式（可选）：
 
 `Translate=True` 且填了 `TranslateBaseUrl`、`TranslateModel` 时，单按 Shift 是 中 → 英 → 译 → 中（状态栏「译」）；
 设了 `TranslateModeKey` 时单按 Shift 只切中英，「译」用这个键进出（插件认出键后带 `WOWTYPE_KEY_ACTION_TOGGLE_TRANSLATE` 交给会话，`ToggleKey` 是 `_TOGGLE_MODE`）。
+`TranslateOneShot=True`（#191）时单按 Shift 也只切中英，双击 Shift 进「译」只翻一句：判定和翻完回去都在会话里（`translate_one_shot`），
+插件在按键（`applySessionFrame`）、定时器（`tickTranslate`）、Shift（`handleShiftKey`）的 frame 里看到 `mode_changed` 就让全局模式跟上。
 核心在 `core/src/translate.rs`（C 接口 `wowtype_translate_*`，见 `wowtype_core.h`）：
 
 - 所有上屏都经 `WowtypeEngine::emit()`；互译时不上屏，攒进 `WowtypeState::tsource_`

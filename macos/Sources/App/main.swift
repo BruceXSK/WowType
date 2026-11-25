@@ -5,7 +5,7 @@
 //   … --selftest                                    载入安装包里的词库打一句话，CI 用来检查链接和资源
 //   … --settings [general|input|emoji|voice|translate|words] 设置窗口（另一个进程，输入法菜单里「设置…」开的就是它）
 //   … --install-lexicon [wanxiang | 文件.tar.gz]      装万象词库并切过去；--use-lexicon rime-ice|wanxiang 切换
-//   … --download-model [--accept-license]          下载本地翻译模型（缺 llama-server 时一起下）
+//   … --download-model                             下载本地翻译模型（缺 llama-server 时一起下）
 //   … --uninstall                                   卸载（关掉、去掉登记、删掉程序；用户数据留着）
 //   … --mode [zh|en|translate|toggle]                 查 / 切最近用过的输入框的中英文（vim 用，同 Linux 的 org.wowtype.Input）
 //   … --version
@@ -120,21 +120,12 @@ func lexiconCommand(_ args: [String]) -> Bool {
     return true
 }
 
-/// 和 Linux 的 wowtype-config --download-model 一样：先同意许可（--accept-license 跳过确认），下载本地翻译模型，
-/// 找不到 llama-server 时顺带下载 llama.cpp 官方的。断了再跑一次接着下。
-func downloadModelCommand(accepted: Bool) -> Bool {
+/// 和 Linux 的 wowtype-config --download-model 一样：下载本地翻译模型（Apache-2.0，不用另外确认；以前的
+/// --accept-license 还认，不起作用），找不到 llama-server 时顺带下载 llama.cpp 官方的。断了再跑一次接着下。
+/// 以前下载过上一代模型的，新的下好以后删掉它。
+func downloadModelCommand() -> Bool {
     print(LocalModel.terms)
-    print("协议全文：\(LocalModel.license)\n")
-    if !accepted {
-        guard isatty(STDIN_FILENO) != 0 else {
-            print("加 --accept-license 表示接受上面的许可")
-            return false
-        }
-        print("接受这份许可并下载？[y/N] ", terminator: "")
-        fflush(stdout)
-        guard let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased(), ["y", "yes"].contains(answer)
-        else { return false }
-    }
+    print("许可全文：\(LocalModel.license)\n")
     let state = AppState.shared
     let config = WowtypeConfig.load(path: state.configPath)
     let model = config.translateLocalModel.isEmpty
@@ -159,6 +150,12 @@ func downloadModelCommand(accepted: Bool) -> Bool {
         } catch {
             print("\n没下完：\((error as? PackError)?.description ?? error.localizedDescription)（再跑一次会接着下）")
             return false
+        }
+    }
+    if config.translateLocalModel.isEmpty {
+        let freed = LocalModelInstaller.removeLegacy(defaultModel: model)
+        if freed > 0 {
+            print("已删除上一代的 \(LocalModel.legacyName)，空出 \(LocalModel.sizeText(freed))")
         }
     }
     print("模型：\(model)")
@@ -281,7 +278,7 @@ if arguments.count > 1 {
     case "--selftest": ok = selfTest()
     case "--settings": SettingsApp.run(page: arguments.count > 2 ? arguments[2] : nil)
     case "--install-lexicon", "--use-lexicon": ok = lexiconCommand(Array(arguments.dropFirst()))
-    case "--download-model": ok = downloadModelCommand(accepted: arguments.contains("--accept-license"))
+    case "--download-model": ok = downloadModelCommand()
     case "--install-voice-model", "--remove-voice-model": ok = voiceModelCommand(Array(arguments.dropFirst()))
     case "--voice-test": ok = voiceTest(arguments.count > 2 ? arguments[2] : "")
     case "--uninstall":
@@ -295,7 +292,7 @@ if arguments.count > 1 {
     default:
         print("用法：WowType [--register | --enable | --select | --disable | --selftest | --settings [页面] | --version |\n"
               + "              --install-lexicon [wanxiang | 文件.tar.gz] | --use-lexicon rime-ice|wanxiang |\n"
-              + "              --download-model [--accept-license] | --install-voice-model [语音包.apk] |\n"
+              + "              --download-model | --install-voice-model [语音包.apk] |\n"
               + "              --remove-voice-model | --voice-test 说的话.wav | --uninstall |\n"
               + "              --mode [zh | en | translate | toggle]]")
         ok = false
@@ -342,6 +339,8 @@ let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
 AppState.shared.loadEngineInBackground()
+// 跨设备复制粘贴只在输入法这个进程里收发（设置窗口是另一个进程，只管配对）
+AppState.shared.startClipboardSync()
 withExtendedLifetime(server) {
     app.run()
 }

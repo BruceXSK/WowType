@@ -102,7 +102,7 @@ public:
     /// 每次真正上屏时调用（text, source, scheme, candidateIndex），给打字统计用；只分类计数，不保存文字。
     /// candidateIndex 是选中的候选位置（1 起），0 表示不是选候选（和 macOS 的 onCommitStats 一样）。
     std::function<void(const std::string &, const std::string &, const std::string &, int)> onCommitStats;
-    /// Ctrl+Delete 忘掉了学错的词以后调用（外壳马上存学习数据）。
+    /// Ctrl+Delete、右键「忘掉这个词」忘掉了学错的词以后调用（外壳马上存学习数据）。
     std::function<void()> onForget;
     /// 打开工具栏的剪贴板页时调用：外壳看一眼系统剪贴板，有新的交给 wowtype_clipboard_remember。
     std::function<void()> sampleClipboard;
@@ -160,6 +160,14 @@ public:
     void cancel();
     /// 点候选框里显示的第 index 个（和按数字键一样）。
     void select(int index);
+    /// 候选右键菜单里那一项的字样（#229），和 Linux、macOS 的一字不差（UTF-8）。
+    static constexpr const char *forgetMenuTitle = "忘掉这个词";
+    /// 候选框里显示的第 index 个能不能「忘掉这个词」：是学过的词（会话的 wowtype_session_can_forget）。
+    /// 工具栏、表情面板、联想、五笔码、没学过的、自定义词都不能。
+    bool canForget(int index);
+    /// 右键菜单的「忘掉这个词」：忘掉显示的第 index 个，和光标移到它上面按 Ctrl+Delete 一样
+    /// （忘掉了 onForget 马上存，编辑区、页码、光标不动，候选框重画）。
+    void forget(int index);
     /// 候选框上点了翻页箭头、滚了滚轮。
     void turnPage(bool forward);
     /// 外壳要上屏一段与拼音无关的字：补空格、记上文，互译时进原文。
@@ -183,13 +191,15 @@ private:
     /// OBSERVE 的 frame 里切了模式（等双击的单按 Shift 被打断）：上屏、重画。
     void followObserved(const WowtypeFrame *frame);
     bool sendToSession(const KeyInput &key, uint32_t action = WOWTYPE_KEY_ACTION_NONE);
+    /// 显示的第 index 个在全部候选里的序号；不在打字、开着面板、越界是 nullopt。
+    std::optional<std::size_t> shownIndex(int index);
     void applyFrame(const WowtypeFrame *frame);
     void drawTool();
     void refreshTranslate(const WowtypeFrame *frame);
     std::optional<CandidatePage> candidatePage(const WowtypeFrame *frame);
     std::string translateSignature(const WowtypeFrame *frame) const;
-    std::string statsSource() const;
-    std::string statsScheme() const;
+    std::string statsSource(Mode mode) const;
+    std::string statsScheme(Mode mode) const;
     uint32_t previousCharacter();
     uint32_t reliablePreviousCharacter();
     uint64_t now() const;
@@ -200,6 +210,8 @@ private:
     WowtypeTranslator *translator_ = nullptr;
     Config config_;
     std::string translateDrawn_;
+    /// 上一次 applyFrame 以后的模式：离开「译」的 frame 里上屏的照「译」记统计
+    Mode appliedMode_ = Mode::Chinese;
     bool associationShown_ = false;
     bool pairing_ = false;
 };

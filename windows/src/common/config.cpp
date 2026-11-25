@@ -129,6 +129,7 @@ const std::vector<SettingDef> &settingDefs() {
         {"FuzzyEngOng", T::Bool, "False"},
         {"TypoCorrection", T::Bool, "True"},
         {"RareExtChars", T::Bool, "False"},
+        {"InlineSpaceSeparator", T::Bool, "False"},
         {"InputScheme", T::Enum, "Quanpin", 0, 0, {"Quanpin", "Shuangpin", "Wubi86"}},
         {"ShuangpinScheme", T::Enum, "Ziranma", 0, 0,
          {"Ziranma", "Xiaohe", "Microsoft", "Sogou", "ABC", "Ziguang", "PinyinJiajia"}},
@@ -148,6 +149,12 @@ const std::vector<SettingDef> &settingDefs() {
         {"Calculator", T::Bool, "True"},
         {"Toolbar", T::Bool, "True"},
         {"ClipboardHistory", T::Bool, "False"},
+        // 跨设备复制粘贴（docs/SYNC.md）。Windows 上由设置程序起的后台进程收发（--sync-agent），
+        // 收到的总是放进系统剪贴板，所以没有 ClipboardSyncPaste
+        {"ClipboardSync", T::Bool, "False"},
+        {"ClipboardSyncLan", T::Bool, "True"},
+        {"ClipboardSyncRelayUrl", T::String, ""},
+        {"ClipboardSyncDeviceName", T::String, ""},
         {"AutoSpace", T::Bool, "False"},
         {"AutoSpaceLetters", T::Bool, "True"},
         {"AutoSpaceDigits", T::Bool, "True"},
@@ -155,6 +162,8 @@ const std::vector<SettingDef> &settingDefs() {
         {"Voice", T::Bool, "True"},
         // 语音键用 fcitx5 的键名（Alt_R、F8），原样存（和 macOS 一样），用的时候 VoiceKey::parse 认，认不出就不用热键
         {"VoiceKey", T::Key, "Alt_R"},
+        // 点按说话时没声音多久自动结束，毫秒；0 不自动结束（再点一下语音键结束，核心里最长录 2 分钟）
+        {"VoiceSilenceTimeout", T::Int, "1500", 0, 60000},
         {"VoiceCopy", T::Bool, "False"},
         {"EmojiSuggest", T::Bool, "True"},
         // Win+. 是系统的表情面板，到不了输入法：和 macOS 一样默认 Control+.（Super 当 Control）
@@ -173,6 +182,7 @@ const std::vector<SettingDef> &settingDefs() {
         {"TranslateBaseUrl", T::String, ""},
         {"TranslateModel", T::String, ""},
         {"TranslateFormal", T::Bool, "False"},
+        {"TranslateOneShot", T::Bool, "False"},
         {"TranslateLocal", T::Bool, "True"},
         {"TranslateLocalModel", T::String, ""},
         {"TranslateLlamaServer", T::String, ""},
@@ -180,6 +190,13 @@ const std::vector<SettingDef> &settingDefs() {
         {"Lexicon", T::String, ""},
     };
     return defs;
+}
+
+const std::vector<IntChoice> &voiceSilenceChoices() {
+    static const std::vector<IntChoice> choices = {
+        {1500, "1.5 秒"}, {3000, "3 秒"}, {5000, "5 秒"}, {10000, "10 秒"}, {30000, "30 秒"}, {0, "不自动结束"},
+    };
+    return choices;
 }
 
 bool impliedTranslateLocal(std::string_view baseUrl) {

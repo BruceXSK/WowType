@@ -1,5 +1,6 @@
 // 语音输入（和 Linux 插件的 handleVoiceKey / pollVoice 一样）：
-// 按下语音键开始听，按住超过 300ms 松开即结束；更短算点按，继续听到静音 1.5 秒或再按一次。
+// 按下语音键开始听，按住超过 300ms 松开即结束；更短算点按，继续听到静音（VoiceSilenceTimeout，默认 1.5 秒，
+// 0 不自动结束）或再按一次。
 // 正在听时编辑区里是识别到一半的字，候选框里是麦克风和跟着音量动的波形；出结果就上屏。
 // 说话途中按 Esc 取消；按别的键也不要这次的语音，键照常处理。正在打拼音时不抢语音键。
 //
@@ -55,6 +56,10 @@ final class VoiceInput {
         self.modelDir = modelDir
         if key != nil && handle == nil {
             handle = wowtype_voice_new(modelDir)
+        }
+        if let handle {
+            // 点按说话的静音超时（#285），毫秒；0 不自动结束，再点一下语音键结束
+            wowtype_voice_set_silence_timeout(handle, UInt32(clamping: config.voiceSilenceTimeout))
         }
     }
 
