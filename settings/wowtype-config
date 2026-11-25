@@ -5347,6 +5347,7 @@ class _AlertDialog:
     def __init__(self, heading="", body=""):
         self.heading, self.body = heading, body
         self.responses, self.styles, self.handlers = [], {}, []
+        self.dialog = None
 
     def add_response(self, response_id, label):
         self.responses.append((response_id, label))
@@ -5373,7 +5374,14 @@ class _AlertDialog:
             for handler in self.handlers:
                 handler(self, answer)
         dialog.connect("response", answered)
+        self.dialog = dialog
         dialog.present()
+
+    def close(self):
+        """跟 Adw.Dialog.close 一样：关掉算取消。"""
+        dialog, self.dialog = self.dialog, None
+        if dialog is not None:
+            dialog.response(Gtk.ResponseType.DELETE_EVENT)
 
 
 class _AboutDialog:
